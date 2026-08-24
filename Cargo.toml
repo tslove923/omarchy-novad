@@ -1,0 +1,35 @@
+[package]
+name = "novad"
+version = "0.1.0"
+edition = "2021"
+description = "NPU-accelerated wake word daemon, handing off to voxtype for transcription"
+license = "MIT"
+
+[[bin]]
+name = "novad"
+path = "src/main.rs"
+
+[dependencies]
+# Raw OpenVINO Core API (Core/Model/CompiledModel/InferRequest) — the
+# 3-stage wake-word pipeline is plain inference, not GenAI, so this is
+# the plain `openvino` crate, unpatched, straight from crates.io. Only
+# a future intent-classifier phase needs the CACHE_DIR-patched
+# openvino-genai fork (see voxtype's Cargo.toml for that patch).
+openvino = "0.11"
+
+# Mic capture — same underlying crate voxtype uses via cpal_capture.rs,
+# used directly here since novad's always-on listen loop doesn't fit
+# voxtype's push-to-talk-shaped AudioCapture trait.
+cpal = "0.15"
+
+clap = { version = "4", features = ["derive"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+thiserror = "1"
+anyhow = "1"
+dirs = "5"
+
+[profile.release]
+lto = true
+strip = true
+opt-level = 3

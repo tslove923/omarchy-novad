@@ -199,7 +199,10 @@ fn compile(
     let path_str = model_path
         .to_str()
         .ok_or_else(|| WakeError::Init(format!("non-utf8 model path: {model_path:?}")))?;
-    // Empty weights_path: OpenVINO derives `<same-basename>.bin` next to the .xml.
+    // Empty weights_path: fine for both IR (derives `<basename>.bin` next
+    // to the .xml) and ONNX (weights are embedded in the .onnx protobuf
+    // itself, so there's no separate weights file to point at). This
+    // pipeline's models are plain .onnx — see model_paths.rs.
     let mut model = core
         .read_model_from_file(path_str, "")
         .map_err(|e| WakeError::Init(format!("read_model {path_str}: {e}")))?;

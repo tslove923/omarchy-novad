@@ -54,7 +54,11 @@ pub struct PopupState {
 
 impl Default for PopupState {
     fn default() -> Self {
-        Self { phase: PopupPhase::Idle, text: String::new(), confirm_label: None }
+        Self {
+            phase: PopupPhase::Idle,
+            text: String::new(),
+            confirm_label: None,
+        }
     }
 }
 
@@ -70,7 +74,10 @@ fn runtime_dir() -> PathBuf {
     // Same fallback shape as the rest of novad (cache_dir(), etc.):
     // prefer XDG_RUNTIME_DIR, fall back to the system temp dir rather
     // than trying to reconstruct /run/user/<uid> ourselves.
-    let dir = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from).unwrap_or_else(std::env::temp_dir).join("novad");
+    let dir = std::env::var_os("XDG_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir)
+        .join("novad");
     let _ = std::fs::create_dir_all(&dir);
     dir
 }

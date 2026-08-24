@@ -1,3 +1,4 @@
+mod classify;
 mod popup;
 mod serve;
 mod wake;
@@ -95,6 +96,17 @@ enum Command {
     /// QML popup in isolation. Waits for `novad respond approve|deny`
     /// during the Confirming phase; press Ctrl+C to stop.
     PopupDemo,
+
+    /// Classify one utterance and print the result. Talks to a running
+    /// `novad serve` instance — no dedicated classifier model, see
+    /// src/classify/mod.rs for why.
+    Classify {
+        text: String,
+        #[arg(long, default_value = "http://127.0.0.1:8420")]
+        base_url: String,
+        #[arg(long, default_value = "qwen3-coder-30b-a3b")]
+        model_id: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -152,7 +164,21 @@ fn main() -> anyhow::Result<()> {
         } => Ok(wake::setup::run(&wakeword)?),
         Command::Respond { action } => popup::respond(&action),
         Command::PopupDemo => run_popup_demo(),
+        Command::Classify {
+            text,
+            base_url,
+            model_id,
+        } => run_classify(&text, &base_url, &model_id),
     }
+}
+
+fn run_classify(text: &str, base_url: &str, model_id: &str) -> anyhow::Result<()> {
+    let classifier = classify::Classifier::new(base_url, model_id);
+    let result = classifier.classify(text)?;
+    println!("intent:   {}", result.intent);
+    println!("argument: {}", result.argument);
+    println!("latency:  {:.2}s", result.latency.as_secs_f32());
+    Ok(())
 }
 
 fn run_popup_demo() -> anyhow::Result<()> {
@@ -168,8 +194,16 @@ fn run_popup_demo() -> anyhow::Result<()> {
         let steps: [(PopupPhase, &str, Option<&str>); 6] = [
             (PopupPhase::Listening, "", None),
             (PopupPhase::Recording, "", None),
-            (PopupPhase::Transcribing, "open firefox and check my calendar", None),
-            (PopupPhase::Classifying, "open firefox and check my calendar", None),
+            (
+                PopupPhase::Transcribing,
+                "open firefox and check my calendar",
+                None,
+            ),
+            (
+                PopupPhase::Classifying,
+                "open firefox and check my calendar",
+                None,
+            ),
             (
                 PopupPhase::Confirming,
                 "Run: firefox --new-window calendar.google.com",
@@ -180,7 +214,11 @@ fn run_popup_demo() -> anyhow::Result<()> {
 
         for (phase, text, confirm_label) in steps {
             println!("[novad] phase -> {phase:?}");
-            popup::write_state(&PopupState { phase, text: text.to_string(), confirm_label: confirm_label.map(String::from) });
+            popup::write_state(&PopupState {
+                phase,
+                text: text.to_string(),
+                confirm_label: confirm_label.map(String::from),
+            });
 
             if phase == PopupPhase::Confirming {
                 println!("[novad] waiting for 'novad respond approve|deny'...");
@@ -188,7 +226,11 @@ fn run_popup_demo() -> anyhow::Result<()> {
                     Ok(PopupAction::Approve) => println!("[novad] approved"),
                     Ok(PopupAction::Deny) => {
                         println!("[novad] denied");
-                        popup::write_state(&PopupState { phase: PopupPhase::Idle, text: String::new(), confirm_label: None });
+                        popup::write_state(&PopupState {
+                            phase: PopupPhase::Idle,
+                            text: String::new(),
+                            confirm_label: None,
+                        });
                         std::thread::sleep(Duration::from_secs(2));
                         continue;
                     }

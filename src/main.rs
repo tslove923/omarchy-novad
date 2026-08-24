@@ -7,6 +7,8 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
 use wake::detector::{Detector, WakeWordListener, DEFAULT_PATIENCE, DEFAULT_THRESHOLD};
 
+const OMAPILOT_PLUGIN_ID: &str = "io.github.spencerbull.omapilot";
+
 #[derive(Parser)]
 #[command(name = "novad", about = "NPU-accelerated wake word daemon for voxtype")]
 struct Cli {
@@ -16,12 +18,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Listen for the wake word and hand off to voxtype on detection.
-    ///
-    /// Phase 1: no intent classification yet. Every detection starts a
-    /// plain voxtype recording and stops it after a short silence
-    /// timeout — the same "wake word -> dictation" flow as nova-npu's
-    /// original, minus the AI routing layered on top in later phases.
+    /// Listen for the wake word and hand off to voxtype (or a
+    /// configured assistant) on detection.
     Detect {
         #[arg(long, default_value = "hey_jarvis")]
         wakeword: String,
@@ -31,10 +29,29 @@ enum Command {
         threshold: f32,
         #[arg(long, default_value_t = DEFAULT_PATIENCE)]
         patience: usize,
-        /// Seconds of near-silence after speech before auto-stopping the
-        /// recording (mirrors nova's wake-word silence timeout).
+        /// Seconds of near-silence after speech before auto-stopping a
+        /// plain voxtype recording. Not used for the omapilot/custom
+        /// triggers below — those own their own session lifecycle.
         #[arg(long, default_value_t = 1.5)]
         silence_timeout_secs: f32,
+        /// What the wake word triggers.
+        ///
+        /// "voxtype" (default when OmaPilot isn't installed): plain
+        /// dictation — `voxtype record start`, then `record stop` on
+        /// the silence timeout above.
+        ///
+        /// "omapilot" (default when OmaPilot's plugin dir is present):
+        /// runs the same IPC action its own Super+A keybind uses
+        /// (`omarchy-shell -q io.github.spencerbull.omapilot
+        /// voiceToggle`) — OmaPilot owns the rest of the flow
+        /// (listening, the assistant conversation, dictation via
+        /// voxtype internally). One shell-out per detection, no
+        /// start/stop pairing on novad's side.
+        ///
+        /// Anything else is run verbatim as a shell command on
+        /// detection, same one-shot semantics as "omapilot".
+        #[arg(long)]
+        on_detect: Option<String>,
     },
 }
 
@@ -51,12 +68,14 @@ fn main() -> anyhow::Result<()> {
             threshold,
             patience,
             silence_timeout_secs,
+            on_detect,
         } => run_detect(
             &wakeword,
             &device,
             threshold,
             patience,
             silence_timeout_secs,
+            on_detect,
         ),
     }
 }
@@ -68,13 +87,56 @@ fn cache_dir() -> std::path::PathBuf {
         .join("wake-cache")
 }
 
+/// A wake-word detection either starts a plain voxtype recording
+/// (start now, stop on silence) or fires a one-shot command that owns
+/// its own session lifecycle (e.g. OmaPilot's voiceToggle).
+enum Trigger {
+    VoxtypeDictation,
+    OneShotCommand(String),
+}
+
+fn resolve_trigger(on_detect: Option<String>) -> Trigger {
+    match on_detect.as_deref() {
+        Some("voxtype") => Trigger::VoxtypeDictation,
+        Some("omapilot") => Trigger::OneShotCommand(omapilot_voice_toggle_cmd()),
+        Some(custom) => Trigger::OneShotCommand(custom.to_string()),
+        None => {
+            // Auto-detect: if OmaPilot's plugin directory exists, prefer
+            // it — richer assistant flow, and it already integrates
+            // with voxtype for dictation internally. Otherwise fall
+            // back to plain voxtype dictation.
+            let omapilot_dir = dirs::config_dir()
+                .unwrap_or_else(std::env::temp_dir)
+                .join("omarchy")
+                .join("plugins")
+                .join(OMAPILOT_PLUGIN_ID);
+            if omapilot_dir.is_dir() {
+                println!(
+                    "[novad] OmaPilot plugin detected at {} — wake word will trigger it.",
+                    omapilot_dir.display()
+                );
+                Trigger::OneShotCommand(omapilot_voice_toggle_cmd())
+            } else {
+                println!("[novad] OmaPilot not installed — wake word will trigger plain voxtype dictation.");
+                Trigger::VoxtypeDictation
+            }
+        }
+    }
+}
+
+fn omapilot_voice_toggle_cmd() -> String {
+    format!("omarchy-shell -q {OMAPILOT_PLUGIN_ID} voiceToggle")
+}
+
 fn run_detect(
     wakeword: &str,
     device: &str,
     threshold: f32,
     patience: usize,
     silence_timeout_secs: f32,
+    on_detect: Option<String>,
 ) -> anyhow::Result<()> {
+    let trigger = resolve_trigger(on_detect);
     let detector = Detector::new(wakeword, device, &cache_dir(), threshold, patience)?;
     let mut listener = WakeWordListener::new(detector, None);
 
@@ -108,7 +170,7 @@ fn run_detect(
 
     let chunk_samples = listener.chunk_samples();
     let mut pending: Vec<i16> = Vec::with_capacity(chunk_samples * 2);
-    let mut recording = false;
+    let mut recording = false; // only meaningful for Trigger::VoxtypeDictation
     let mut last_speech = std::time::Instant::now();
     let silence_timeout = std::time::Duration::from_secs_f32(silence_timeout_secs);
 
@@ -120,19 +182,28 @@ fn run_detect(
             if !recording {
                 if let Some(detection) = listener.feed(&chunk)? {
                     println!("\n[novad] Wake word detected! score={:.3}", detection.score);
-                    if let Err(e) = std::process::Command::new("voxtype")
-                        .args(["record", "start"])
-                        .status()
-                    {
-                        tracing::error!("failed to run 'voxtype record start': {e}");
-                        continue;
+                    match &trigger {
+                        Trigger::VoxtypeDictation => {
+                            if let Err(e) = std::process::Command::new("voxtype")
+                                .args(["record", "start"])
+                                .status()
+                            {
+                                tracing::error!("failed to run 'voxtype record start': {e}");
+                                continue;
+                            }
+                            recording = true;
+                            last_speech = std::time::Instant::now();
+                        }
+                        Trigger::OneShotCommand(cmd) => {
+                            run_shell(cmd);
+                            listener.reset();
+                        }
                     }
-                    recording = true;
-                    last_speech = std::time::Instant::now();
                 }
             } else {
                 // Cheap RMS gate for the silence-timeout — not a real
                 // VAD, just enough to know "still talking" vs "quiet".
+                // Only reached under Trigger::VoxtypeDictation.
                 let rms = rms_i16(&chunk);
                 if rms > 300.0 {
                     last_speech = std::time::Instant::now();
@@ -152,6 +223,19 @@ fn run_detect(
     }
 
     Ok(())
+}
+
+fn run_shell(cmd: &str) {
+    let result = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(cmd)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
+    match result {
+        Ok(_) => tracing::info!("Ran on-detect trigger: {cmd}"),
+        Err(e) => tracing::error!("Failed to run on-detect trigger '{cmd}': {e}"),
+    }
 }
 
 fn rms_i16(samples: &[i16]) -> f32 {

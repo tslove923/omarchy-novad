@@ -1,3 +1,4 @@
+mod serve;
 mod wake;
 
 use std::sync::mpsc;
@@ -53,6 +54,25 @@ enum Command {
         #[arg(long)]
         on_detect: Option<String>,
     },
+
+    /// Serve a local model over an OpenAI-compatible HTTP API
+    /// (`/v1/chat/completions`) so OmaPilot — or anything else that
+    /// speaks that protocol — can use it as a local provider. See
+    /// docs/omapilot-local-provider.md for the models.json entry.
+    Serve {
+        /// Path to an OpenVINO IR model directory (e.g. a downloaded
+        /// `OpenVINO/*-int4-ov` repo).
+        #[arg(long)]
+        model: std::path::PathBuf,
+        #[arg(long, default_value = "GPU")]
+        device: String,
+        /// Id reported in API responses and /v1/models (this is what
+        /// goes in the OmaPilot models.json "id" field).
+        #[arg(long, default_value = "novad-local")]
+        model_id: String,
+        #[arg(long, default_value_t = 8420)]
+        port: u16,
+    },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -77,7 +97,29 @@ fn main() -> anyhow::Result<()> {
             silence_timeout_secs,
             on_detect,
         ),
+        Command::Serve {
+            model,
+            device,
+            model_id,
+            port,
+        } => {
+            let config = serve::ServeConfig {
+                model_path: model,
+                device,
+                cache_dir: serve_cache_dir(),
+                model_id,
+                port,
+            };
+            tokio::runtime::Runtime::new()?.block_on(serve::run(config))
+        }
     }
+}
+
+fn serve_cache_dir() -> std::path::PathBuf {
+    dirs::cache_dir()
+        .unwrap_or_else(std::env::temp_dir)
+        .join("novad")
+        .join("llm-cache")
 }
 
 fn cache_dir() -> std::path::PathBuf {

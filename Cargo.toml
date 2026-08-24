@@ -12,15 +12,25 @@ path = "src/main.rs"
 [dependencies]
 # Raw OpenVINO Core API (Core/Model/CompiledModel/InferRequest) — the
 # 3-stage wake-word pipeline is plain inference, not GenAI, so this is
-# the plain `openvino` crate, unpatched, straight from crates.io. Only
-# a future intent-classifier phase needs the CACHE_DIR-patched
-# openvino-genai fork (see voxtype's Cargo.toml for that patch).
+# the plain `openvino` crate, unpatched, straight from crates.io.
 openvino = "0.11"
+
+# LLM inference for `novad serve` (OpenAI-compatible local provider).
+# Unlike WhisperPipeline (see voxtype's Cargo.toml [patch.crates-io]),
+# LlmPipeline already has with_properties() upstream — no fork needed
+# here, plain crates.io release.
+openvino-genai = { version = "0.11", features = ["runtime-linking"] }
 
 # Mic capture — same underlying crate voxtype uses via cpal_capture.rs,
 # used directly here since novad's always-on listen loop doesn't fit
 # voxtype's push-to-talk-shaped AudioCapture trait.
 cpal = "0.15"
+
+# `novad serve`'s OpenAI-compatible HTTP surface.
+axum = "0.7"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 
 clap = { version = "4", features = ["derive"] }
 tracing = "0.1"

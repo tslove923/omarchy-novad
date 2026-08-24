@@ -38,7 +38,24 @@ PanelWindow {
 
     WlrLayershell.namespace: "novad-popup"
     WlrLayershell.layer: WlrLayer.Overlay
-    WlrLayershell.keyboardFocus: hasContent ? WlrKeyboardFocus.OnDemand : WlrKeyboardFocus.None
+    // Never grab keyboard focus — the popup only needs mouse clicks on
+    // its own buttons, and OnDemand focus with no dismiss key/click-away
+    // handling left it stealing input with no way to get it back short
+    // of killing the process. Real bug, found the hard way.
+    WlrLayershell.keyboardFocus: WlrKeyboardFocus.None
+
+    // Restrict the actually-interactive input region to the card itself
+    // — without this, the full-screen anchor above (needed to position
+    // the card via anchors.horizontalCenter/bottom below) makes the
+    // ENTIRE screen swallow clicks while the popup is visible, not just
+    // the small area actually drawn. Everything outside `card`'s bounds
+    // must stay click-through to whatever's underneath.
+    mask: Region {
+        x: card.x
+        y: card.y
+        width: card.width
+        height: card.height
+    }
 
     // ── Palette (Catppuccin Mocha, matching nova's original popup —
     //    not Omarchy-theme-driven yet; see roadmap for follow-up) ──

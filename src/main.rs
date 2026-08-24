@@ -73,6 +73,25 @@ enum Command {
         #[arg(long, default_value_t = 8420)]
         port: u16,
     },
+
+    /// One-time setup tasks.
+    Setup {
+        #[command(subcommand)]
+        what: SetupCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum SetupCommand {
+    /// Prepare a stock openWakeWord phrase for `novad detect` (fetches
+    /// the model and removes an ONNX If-node the NPU can't run, via a
+    /// throwaway `uv`-managed Python env — nothing installed
+    /// persistently). Not for training a new phrase — see the wake
+    /// module's docs for that.
+    WakeModel {
+        #[arg(default_value = "hey_jarvis")]
+        wakeword: String,
+    },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -112,6 +131,9 @@ fn main() -> anyhow::Result<()> {
             };
             tokio::runtime::Runtime::new()?.block_on(serve::run(config))
         }
+        Command::Setup {
+            what: SetupCommand::WakeModel { wakeword },
+        } => Ok(wake::setup::run(&wakeword)?),
     }
 }
 

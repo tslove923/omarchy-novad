@@ -21,6 +21,7 @@ pub mod audio_features;
 pub mod detector;
 pub mod model_paths;
 pub mod npu_engine;
+pub mod setup;
 
 #[derive(Debug, thiserror::Error)]
 pub enum WakeError {

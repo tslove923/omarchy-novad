@@ -1,3 +1,4 @@
+mod popup;
 mod serve;
 mod wake;
 
@@ -79,6 +80,21 @@ enum Command {
         #[command(subcommand)]
         what: SetupCommand,
     },
+
+    /// Send one action to a running `novad detect`'s standalone popup
+    /// (approve/deny a pending command, insert/cancel a dictation
+    /// review). Called by the popup's own button clicks via
+    /// `Quickshell.Io.Process` — not normally run by hand.
+    Respond {
+        #[arg(value_parser = ["insert", "cancel", "approve", "deny"])]
+        action: String,
+    },
+
+    /// Cycle the standalone popup through sample states with no wake
+    /// word / mic / model involved — for developing and testing the
+    /// QML popup in isolation. Waits for `novad respond approve|deny`
+    /// during the Confirming phase; press Ctrl+C to stop.
+    PopupDemo,
 }
 
 #[derive(Subcommand)]
@@ -134,6 +150,58 @@ fn main() -> anyhow::Result<()> {
         Command::Setup {
             what: SetupCommand::WakeModel { wakeword },
         } => Ok(wake::setup::run(&wakeword)?),
+        Command::Respond { action } => popup::respond(&action),
+        Command::PopupDemo => run_popup_demo(),
+    }
+}
+
+fn run_popup_demo() -> anyhow::Result<()> {
+    use popup::{ControlServer, PopupAction, PopupPhase, PopupState};
+    use std::time::Duration;
+
+    let rx = ControlServer::spawn()?;
+    println!("[novad] Popup demo running. Launch the popup with:");
+    println!("  qs -p {}/quickshell", env!("CARGO_MANIFEST_DIR"));
+    println!("[novad] Ctrl+C to stop.\n");
+
+    loop {
+        let steps: [(PopupPhase, &str, Option<&str>); 6] = [
+            (PopupPhase::Listening, "", None),
+            (PopupPhase::Recording, "", None),
+            (PopupPhase::Transcribing, "open firefox and check my calendar", None),
+            (PopupPhase::Classifying, "open firefox and check my calendar", None),
+            (
+                PopupPhase::Confirming,
+                "Run: firefox --new-window calendar.google.com",
+                Some("Open Firefox to your calendar?"),
+            ),
+            (PopupPhase::Ready, "Done.", None),
+        ];
+
+        for (phase, text, confirm_label) in steps {
+            println!("[novad] phase -> {phase:?}");
+            popup::write_state(&PopupState { phase, text: text.to_string(), confirm_label: confirm_label.map(String::from) });
+
+            if phase == PopupPhase::Confirming {
+                println!("[novad] waiting for 'novad respond approve|deny'...");
+                match rx.recv() {
+                    Ok(PopupAction::Approve) => println!("[novad] approved"),
+                    Ok(PopupAction::Deny) => {
+                        println!("[novad] denied");
+                        popup::write_state(&PopupState { phase: PopupPhase::Idle, text: String::new(), confirm_label: None });
+                        std::thread::sleep(Duration::from_secs(2));
+                        continue;
+                    }
+                    Ok(other) => println!("[novad] got {other:?} (expected approve/deny here)"),
+                    Err(_) => return Ok(()),
+                }
+            } else {
+                std::thread::sleep(Duration::from_secs(2));
+            }
+        }
+
+        popup::write_state(&PopupState::default());
+        std::thread::sleep(Duration::from_secs(3));
     }
 }
 

@@ -275,25 +275,16 @@ fn resolve_trigger(on_detect: Option<String>) -> Trigger {
         Some("omapilot") => Trigger::OneShotCommand(omapilot_voice_toggle_cmd()),
         Some(custom) => Trigger::OneShotCommand(custom.to_string()),
         None => {
-            // Auto-detect: if OmaPilot's plugin directory exists, prefer
-            // it — richer assistant flow, and it already integrates
-            // with voxtype for dictation internally. Otherwise fall
-            // back to plain voxtype dictation.
-            let omapilot_dir = dirs::config_dir()
-                .unwrap_or_else(std::env::temp_dir)
-                .join("omarchy")
-                .join("plugins")
-                .join(OMAPILOT_PLUGIN_ID);
-            if omapilot_dir.is_dir() {
-                println!(
-                    "[novad] OmaPilot plugin detected at {} — wake word will trigger it.",
-                    omapilot_dir.display()
-                );
-                Trigger::OneShotCommand(omapilot_voice_toggle_cmd())
-            } else {
-                println!("[novad] OmaPilot not installed — wake word will trigger plain voxtype dictation.");
-                Trigger::VoxtypeDictation
-            }
+            // Default: the standalone flow (voxtype dictation, and
+            // eventually novad's own classify/popup pipeline). Does
+            // NOT auto-detect OmaPilot's plugin directory anymore --
+            // that dir persists across a disable (uninstalling isn't
+            // required to turn it off, see shell.json), so its mere
+            // presence on disk was never a reliable "OmaPilot is what
+            // I want" signal. Pass `--on-detect omapilot` explicitly
+            // to opt back into it.
+            println!("[novad] wake word will trigger standalone voxtype dictation (pass --on-detect omapilot to use OmaPilot instead).");
+            Trigger::VoxtypeDictation
         }
     }
 }

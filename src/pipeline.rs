@@ -16,6 +16,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use crate::classify::Classifier;
+use crate::config::HomeAssistantConfig;
 use crate::popup::{self, PopupAction, PopupPhase, PopupState};
 use crate::router::{self, RouteResult};
 
@@ -41,6 +42,11 @@ pub struct PipelineConfig {
     pub voxtype_binary: String,
     pub transcript_path: PathBuf,
     pub voxtype_state_path: PathBuf,
+    /// `None` when `[home_assistant]` isn't configured (see
+    /// config.rs) -- `Intent::HomeAssistant` falls back to
+    /// `RouteResult::Unhandled` in that case, same as before this
+    /// intent had a handler at all.
+    pub home_assistant: Option<HomeAssistantConfig>,
 }
 
 /// Run one full session after a wake-word detection: start voxtype
@@ -134,7 +140,7 @@ pub fn run_session(cfg: &PipelineConfig) {
         return;
     }
 
-    match router::route(result.intent, &result.argument) {
+    match router::route(result.intent, &result.argument, cfg.home_assistant.as_ref()) {
         RouteResult::Done { success, message } => {
             tracing::info!("[pipeline] routed: success={success} message={message:?}");
             show_ready_and_wait(&message);

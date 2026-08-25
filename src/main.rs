@@ -1,4 +1,5 @@
 mod classify;
+mod config;
 mod pipeline;
 mod popup;
 mod router;
@@ -138,6 +139,8 @@ fn main() -> anyhow::Result<()> {
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
 
+    let file_config = config::load()?;
+
     let cli = Cli::parse();
     match cli.command {
         Command::Detect {
@@ -148,21 +151,37 @@ fn main() -> anyhow::Result<()> {
             classify_base_url,
             classify_model_id,
             on_detect,
-        } => run_detect(
-            &wakeword,
-            &device,
-            threshold,
-            patience,
-            &classify_base_url,
-            &classify_model_id,
-            on_detect,
-        ),
+        } => {
+            let d = &file_config.detect;
+            run_detect(
+                &config::resolve_str(wakeword, "hey_jarvis", &d.wakeword),
+                &config::resolve_str(device, "NPU", &d.device),
+                threshold, // numeric flags have their own clap defaults already; not worth the Option<> plumbing to override from file for these two
+                patience,
+                &config::resolve_str(
+                    classify_base_url,
+                    "http://127.0.0.1:8420",
+                    &d.classify_base_url,
+                ),
+                &config::resolve_str(
+                    classify_model_id,
+                    "qwen3-1.7b-instruct",
+                    &d.classify_model_id,
+                ),
+                config::resolve_opt(on_detect, d.on_detect.clone()),
+                file_config.home_assistant,
+            )
+        }
         Command::Serve {
             model,
             device,
             model_id,
             port,
         } => {
+            let s = &file_config.serve;
+            let device = config::resolve_str(device, "GPU", &s.device);
+            let model_id = config::resolve_str(model_id, "novad-local", &s.model_id);
+            let port = if port != 8420 { port } else { s.port };
             let config = serve::ServeConfig {
                 model_path: model,
                 device,
@@ -308,6 +327,7 @@ fn omapilot_voice_toggle_cmd() -> String {
     format!("omarchy-shell -q {OMAPILOT_PLUGIN_ID} voiceToggle")
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_detect(
     wakeword: &str,
     device: &str,
@@ -316,6 +336,7 @@ fn run_detect(
     classify_base_url: &str,
     classify_model_id: &str,
     on_detect: Option<String>,
+    home_assistant: Option<config::HomeAssistantConfig>,
 ) -> anyhow::Result<()> {
     let trigger = resolve_trigger(on_detect);
     let detector = Detector::new(wakeword, device, &cache_dir(), threshold, patience)?;
@@ -357,6 +378,7 @@ fn run_detect(
         voxtype_binary: "voxtype".to_string(),
         transcript_path: transcript_path(),
         voxtype_state_path: voxtype_state_path(),
+        home_assistant,
     };
 
     let chunk_samples = listener.chunk_samples();

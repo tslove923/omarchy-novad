@@ -34,6 +34,20 @@ futures-util = "0.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
+# Persistent config file (~/.config/omarchy-novad/config.toml) -- see
+# config.rs. Everything was CLI-flags-only until Home Assistant needed
+# somewhere to keep a token that isn't shell history or `ps aux`.
+toml = "0.8"
+
+# Structured in-place edits to config.toml's [spotify] section
+# (refresh_token/access_token/expires_at, written back after OAuth and
+# every token refresh) that preserve the rest of the file -- comments,
+# formatting, [home_assistant]'s token -- byte for byte. Plain `toml`
+# only round-trips a full Config struct back to a fresh document,
+# which would silently drop every comment in a file the user hand-
+# edits and curates.
+toml_edit = "0.22"
+
 # `omarchy-novad classify`'s client side — a blocking call against
 # omarchy-novad serve's own /v1/chat/completions, same crate voxtype
 # itself uses for its remote/API calls (see voxtype's Cargo.toml).

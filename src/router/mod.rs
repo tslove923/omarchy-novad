@@ -1,16 +1,17 @@
 //! Command router — maps a [`Intent`](crate::classify::Intent) from
 //! the classifier to an executed action. Scoped port of nova-npu's
 //! `ai/router.py` + `ai/commands/*.py`: covers the intents that have
-//! a simple, config-free local handler (app launch, web search/open,
-//! system volume/brightness, MPRIS media control) plus TERMINAL, which
-//! needs a confirm round-trip through the popup before running
+//! a simple local handler (app launch, web search/open, system
+//! volume/brightness, MPRIS media control, Home Assistant when
+//! `[home_assistant]` is configured -- see config.rs) plus TERMINAL,
+//! which needs a confirm round-trip through the popup before running
 //! anything, and EXTERNAL/CODING, which hand off to a real reasoning
-//! agent via `openclaw` (see openclaw.rs). HOME_ASSISTANT and
-//! MEMORY_RETURN still fall through to [`RouteResult::Unhandled`] --
-//! no local handler for those yet, and guessing wrong there (a smart-
-//! home action, a memory lookup) is worse than admitting "not yet."
+//! agent via `openclaw` (see openclaw.rs). MEMORY_RETURN still falls
+//! through to [`RouteResult::Unhandled`] -- no local handler for it
+//! yet, and guessing wrong there is worse than admitting "not yet."
 
 mod app_launcher;
+pub mod home_assistant;
 mod media_control;
 mod openclaw;
 mod system_control;
@@ -18,6 +19,7 @@ mod terminal;
 mod web;
 
 use crate::classify::Intent;
+use crate::config::HomeAssistantConfig;
 
 /// Outcome of routing one classified utterance.
 pub enum RouteResult {
@@ -45,8 +47,15 @@ pub fn is_external_handoff(intent: Intent) -> bool {
 }
 
 /// Route (and, unless it needs confirmation, execute) one classified
-/// utterance.
-pub fn route(intent: Intent, argument: &str) -> RouteResult {
+/// utterance. `home_assistant` is `None` when `[home_assistant]` isn't
+/// configured (see config.rs) -- `Intent::HomeAssistant` falls back to
+/// `RouteResult::Unhandled` in that case rather than erroring, same
+/// shape as every other not-yet-handled intent.
+pub fn route(
+    intent: Intent,
+    argument: &str,
+    home_assistant: Option<&HomeAssistantConfig>,
+) -> RouteResult {
     match intent {
         Intent::OpenApp => {
             let (ok, msg) = app_launcher::open_app(argument);
@@ -83,6 +92,23 @@ pub fn route(intent: Intent, argument: &str) -> RouteResult {
                     message: msg,
                 };
             }
+            // Same recovery, different pair: "turn on the living room
+            // lights" observed misclassified as SYSTEM_CONTROL too
+            // (see README's "Known classifier gaps") -- catch it
+            // before falling through to system_control::run, but only
+            // when HA is actually configured; otherwise let it fail
+            // the normal system_control path rather than claim a
+            // false "Home Assistant not configured" for a volume/
+            // brightness phrase that happens to share a verb.
+            if let Some(cfg) = home_assistant {
+                if home_assistant::looks_like_home_assistant_command(argument) {
+                    let (ok, msg) = home_assistant::run(argument, cfg);
+                    return RouteResult::Done {
+                        success: ok,
+                        message: msg,
+                    };
+                }
+            }
             let (ok, msg) = system_control::run(argument);
             RouteResult::Done {
                 success: ok,
@@ -109,15 +135,23 @@ pub fn route(intent: Intent, argument: &str) -> RouteResult {
                 }
             }
         }
+        Intent::HomeAssistant => match home_assistant {
+            Some(cfg) => {
+                let (ok, msg) = home_assistant::run(argument, cfg);
+                RouteResult::Done {
+                    success: ok,
+                    message: msg,
+                }
+            }
+            None => RouteResult::Unhandled,
+        },
         // External/Coding don't go through here -- pipeline.rs checks
         // is_external_handoff() before calling route() and calls
         // openclaw::handoff() directly against the full transcript
         // instead of this intent's (often keyword-stripped) argument.
         // A coding/reasoning request needs the whole utterance for
         // context, not an extracted phrase -- see openclaw.rs's docs.
-        Intent::HomeAssistant | Intent::MemoryReturn | Intent::Coding | Intent::External => {
-            RouteResult::Unhandled
-        }
+        Intent::MemoryReturn | Intent::Coding | Intent::External => RouteResult::Unhandled,
     }
 }
 

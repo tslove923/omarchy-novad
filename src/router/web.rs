@@ -50,7 +50,7 @@ fn xdg_open(url: &str) -> (bool, String) {
 }
 
 /// Percent-encode for a URL query component. `url`/`urlencoding` isn't
-/// already a novad dependency and this only needs to handle plain
+/// already a omarchy-novad dependency and this only needs to handle plain
 /// spoken-text queries, so a small hand-rolled encoder is enough
 /// rather than pulling in a crate for it.
 fn percent_encode(s: &str) -> String {

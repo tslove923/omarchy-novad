@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+# openclaw-handoff — novad → OpenClaw one-shot handoff (CLI bridge).
+#
+# novad's router shells out to this for anything it can't handle itself.
+#
+# Usage:
+#   openclaw-handoff "<utterance>..." [conversation-id]
+#   echo "<utterance>" | openclaw-handoff [conversation-id]
+#
+# Prints OpenClaw's reply on stdout, exits 0. On failure prints a short
+# fallback line and exits 1.
+#
+# Credentials come from ${OPENCLAW_NOVAD_ENV:-~/.config/openclaw-novad.env}
+# (OPENCLAW_GATEWAY_URL + OPENCLAW_GATEWAY_TOKEN).
+
+set -u
+
+ENV_FILE="${OPENCLAW_NOVAD_ENV:-$HOME/.config/openclaw-novad.env}"
+if [[ -f "$ENV_FILE" ]]; then
+  set -a
+  # shellcheck disable=SC1090
+  . "$ENV_FILE"
+  set +a
+fi
+
+: "${OPENCLAW_GATEWAY_URL:?OPENCLAW_GATEWAY_URL not set (missing $ENV_FILE?)}"
+: "${OPENCLAW_GATEWAY_TOKEN:?OPENCLAW_GATEWAY_TOKEN not set (missing $ENV_FILE?)}"
+
+if [[ $# -ge 1 ]] && [[ -n "$1" ]]; then
+  msg="$1"
+else
+  msg="$(cat 2>/dev/null || true)"
+fi
+conv="${2:-default}"
+if [[ -z "$msg" ]]; then
+  echo "I didn't catch that — could you say it again?" >&2
+  exit 1
+fi
+
+# Sanitize the session-key segment so arbitrary conversation ids can't
+# introduce characters that break the agent:main:novad:<key> form.
+conv="$(printf '%s' "$conv" | tr -c 'A-Za-z0-9._-' '_')"
+
+export OPENCLAW_GATEWAY_URL OPENCLAW_GATEWAY_TOKEN
+out="$(openclaw agent --agent main --session-key "agent:main:novad:$conv" --message "$msg" --json 2>/tmp/openclaw-handoff.err)"
+rc=$?
+if [[ $rc -ne 0 ]]; then
+  cat /tmp/openclaw-handoff.err >&2 || true
+  echo "The gateway assistant is unavailable right now — try again in a moment." >&2
+  exit 1
+fi
+
+# Pull the last payload text (the reply) out of the JSON result.
+reply="$(printf '%s' "$out" | python3 -c 'import sys, json
+d = json.load(sys.stdin)
+p = (d.get("result") or {}).get("payloads") or []
+if p and p[-1].get("text"):
+    print(p[-1]["text"])
+' 2>/dev/null || true)"
+
+if [[ -n "$reply" ]]; then
+  printf '%s\n' "$reply"
+else
+  echo "The gateway assistant replied, but I couldn't read its answer." >&2
+  exit 1
+fi

@@ -1055,28 +1055,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "novad"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "axum",
- "clap",
- "cpal",
- "dirs",
- "futures-util",
- "openvino",
- "openvino-genai",
- "serde",
- "serde_json",
- "thiserror 1.0.69",
- "tokio",
- "tokio-stream",
- "tracing",
- "tracing-subscriber",
- "ureq",
-]
-
-[[package]]
 name = "nu-ansi-term"
 version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1148,6 +1126,28 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6c8bb09a4a2b1d668170cfe0a7d5bc103f8999fb316c98099b6a9939c9f2e79d"
 dependencies = [
  "cc",
+]
+
+[[package]]
+name = "omarchy-novad"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "clap",
+ "cpal",
+ "dirs",
+ "futures-util",
+ "openvino",
+ "openvino-genai",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-stream",
+ "tracing",
+ "tracing-subscriber",
+ "ureq",
 ]
 
 [[package]]

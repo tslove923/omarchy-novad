@@ -7,10 +7,11 @@
 //!
 //! The bridge script (not this file) owns the actual OpenClaw
 //! transport (gateway WebSocket URL + token, from
-//! `~/.config/openclaw-novad.env`, chmod 600) — this module only
-//! knows how to invoke it and interpret its exit code, matching the
-//! shell-out pattern `app_launcher`/`web` already use for their own
-//! external processes.
+//! `~/.config/openclaw-novad.env`, chmod 600 -- the script's own
+//! path, unrelated to this crate's rename to omarchy-novad) — this
+//! module only knows how to invoke it and interpret its exit code,
+//! matching the shell-out pattern `app_launcher`/`web` already use
+//! for their own external processes.
 
 use std::process::{Command, Stdio};
 use std::time::Duration;
@@ -24,9 +25,9 @@ const HANDOFF_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// All wake-word-triggered handoffs share one conversation so OpenClaw
 /// keeps context across turns (nova's own `coding_bridge.py` did the
-/// same with its in-process `_history` list) -- novad doesn't have a
+/// same with its in-process `_history` list) -- omarchy-novad doesn't have a
 /// per-session/per-user conversation concept yet, so this is the
-/// simplest thing that gives real continuity today. Revisit if novad
+/// simplest thing that gives real continuity today. Revisit if omarchy-novad
 /// ever needs to distinguish separate voice "conversations" (e.g. a
 /// timeout-based reset, or multiple concurrent users).
 const CONVERSATION_ID: &str = "voice";

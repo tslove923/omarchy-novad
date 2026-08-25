@@ -1,17 +1,17 @@
 //! Intent classification — routes a transcribed utterance to one of
 //! nova-npu's original intent categories (`ai/intent_classifier.py`),
-//! but as a plain HTTP client against `novad serve`'s own
+//! but as a plain HTTP client against `omarchy-novad serve`'s own
 //! `/v1/chat/completions`, not a second hosted model.
 //!
 //! Originally scoped for a dedicated small model (Qwen3-1.7B-Instruct)
-//! alongside the bigger chat model `novad serve` already hosts for
+//! alongside the bigger chat model `omarchy-novad serve` already hosts for
 //! OmaPilot. Measured against the real Qwen3-Coder-30B-A3B instance
 //! instead first: 0.5-1.6s per classification once warm, correct on
 //! every test utterance tried. Not as fast as a dedicated small model
-//! would be, but fast enough, and it means novad never has to load a
+//! would be, but fast enough, and it means omarchy-novad never has to load a
 //! second model into memory just for this. If per-call latency ever
 //! becomes a real problem, the fix is a dedicated small model behind
-//! its own `novad serve` instance — this module doesn't care which
+//! its own `omarchy-novad serve` instance — this module doesn't care which
 //! model answers, only that something at `base_url` does.
 
 use serde::{Deserialize, Serialize};
@@ -152,7 +152,7 @@ pub struct Classifier {
 }
 
 impl Classifier {
-    /// `base_url` is `novad serve`'s own address, e.g.
+    /// `base_url` is `omarchy-novad serve`'s own address, e.g.
     /// `http://127.0.0.1:8420`.
     pub fn new(base_url: impl Into<String>, model_id: impl Into<String>) -> Self {
         Self {

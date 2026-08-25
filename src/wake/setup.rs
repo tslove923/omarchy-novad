@@ -1,8 +1,8 @@
-//! `novad setup wake-model <name>` — wraps the one-time model prep step
+//! `omarchy-novad setup wake-model <name>` — wraps the one-time model prep step
 //! so a user never has to know `scripts/convert_wake_model.py` exists.
 //!
 //! The script itself is embedded in the binary (`include_str!`) rather
-//! than read from disk, so this works regardless of how/where novad was
+//! than read from disk, so this works regardless of how/where omarchy-novad was
 //! installed — no dependency on running from a repo checkout.
 
 use std::io::Write;
@@ -22,15 +22,15 @@ pub fn run(wakeword_name: &str) -> Result<(), WakeError> {
              Install uv, then re-run this command:\n  \
              curl -LsSf https://astral.sh/uv/install.sh | sh\n  \
              source $HOME/.local/bin/env   # or restart your shell\n  \
-             novad setup wake-model {wakeword_name}"
+             omarchy-novad setup wake-model {wakeword_name}"
         )));
     }
 
-    let script_path = std::env::temp_dir().join("novad-convert-wake-model.py");
+    let script_path = std::env::temp_dir().join("omarchy-novad-convert-wake-model.py");
     std::fs::write(&script_path, CONVERT_SCRIPT)
         .map_err(|e| WakeError::Init(format!("write temp script {script_path:?}: {e}")))?;
 
-    println!("[novad] Preparing '{wakeword_name}' (uv fetches onnx+openwakeword into a throwaway env, nothing persists)...");
+    println!("[omarchy-novad] Preparing '{wakeword_name}' (uv fetches onnx+openwakeword into a throwaway env, nothing persists)...");
     std::io::stdout().flush().ok();
 
     let status = Command::new("uv")
@@ -51,6 +51,8 @@ pub fn run(wakeword_name: &str) -> Result<(), WakeError> {
         )));
     }
 
-    println!("[novad] Done. 'novad detect --wakeword {wakeword_name}' should work now.");
+    println!(
+        "[omarchy-novad] Done. 'omarchy-novad detect --wakeword {wakeword_name}' should work now."
+    );
     Ok(())
 }

@@ -38,7 +38,7 @@ pub struct NpuEngine {
     mel_request: InferRequest,
     emb_request: InferRequest,
     ww_request: InferRequest,
-    // Reserved for the `novad detect --stats` diagnostics surface (see
+    // Reserved for the `omarchy-novad detect --stats` diagnostics surface (see
     // Detector::avg_inference_ms).
     #[allow(dead_code)]
     pub compile_times: [(&'static str, std::time::Duration); 3],

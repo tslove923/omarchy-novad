@@ -1,5 +1,5 @@
-// novad standalone assistant popup — QML port of nova-npu's Electron
-// popup (electron/renderer/popup.{html,css,js}).
+// omarchy-novad standalone assistant popup — QML port of nova-npu's
+// Electron popup (electron/renderer/popup.{html,css,js}).
 //
 // Same layer-shell + visibility-toggle pattern as voxtype's
 // EnginePicker.qml: a full-anchored PanelWindow that's only actually
@@ -7,8 +7,9 @@
 // show, so it never intercepts clicks elsewhere on screen.
 //
 // State comes from PopupState (a JSON file the daemon rewrites on every
-// transition); actions go back out via `novad respond <action>` run
-// through Quickshell.Io.Process, same mechanism as MeetingControls.qml.
+// transition); actions go back out via `omarchy-novad respond <action>`
+// run through Quickshell.Io.Process, same mechanism as
+// MeetingControls.qml.
 //
 // The animated conic-gradient border from nova's CSS (rotate while
 // recording, strobe while transcribing, flash on ready) is ported for
@@ -125,7 +126,7 @@ PanelWindow {
         respondProcess.running = true;
     }
 
-    property string novadBinary: "novad"
+    property string novadBinary: "omarchy-novad"
 
     Process {
         id: respondProcess
@@ -152,9 +153,9 @@ PanelWindow {
         anchors.horizontalCenter: parent.horizontalCenter
         // Matches nova's Electron popup exactly (main.js createPopupWindow:
         // y = screenH * 0.3, centered horizontally) rather than the bottom
-        // anchor the first QML pass used. Also keeps novad's popup clear of
+        // anchor the first QML pass used. Also keeps omarchy-novad's popup clear of
         // voxtype's own OSD, which sits low (bottom-center, top_margin=0.85
-        // in voxtype's config.toml) — novad on top, voxtype below.
+        // in voxtype's config.toml) — omarchy-novad on top, voxtype below.
         anchors.top: parent.top
         anchors.topMargin: Math.round(root.height * 0.3)
 

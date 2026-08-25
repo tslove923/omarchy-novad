@@ -4,7 +4,7 @@
 //! configuration. Nova's `play_track` (search-and-play a specific
 //! song) fell back to the Spotify Web API when MPRIS alone couldn't
 //! satisfy it -- that needs a configured `ai_spotify_*` client
-//! id/secret nova had and novad doesn't have an equivalent for yet, so
+//! id/secret nova had and omarchy-novad doesn't have an equivalent for yet, so
 //! "play <song>" here just sends a bare Play to the current player
 //! rather than attempting a search.
 
@@ -222,7 +222,7 @@ pub fn run(argument: &str) -> (bool, String) {
 /// classifier's short-utterance context always disambiguates "stop"
 /// (a player) from "stop" (unrelated). Mirrors nova's own
 /// `looks_like_media_command` EXTERNAL-recovery check in router.py,
-/// applied to a different intent pair here since novad's classifier
+/// applied to a different intent pair here since omarchy-novad's classifier
 /// taxonomy doesn't route SYSTEM_CONTROL through EXTERNAL first.
 pub fn looks_like_media_command(text: &str) -> bool {
     let lower = text.to_lowercase();

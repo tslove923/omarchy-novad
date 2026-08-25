@@ -15,7 +15,10 @@ use wake::detector::{Detector, WakeWordListener, DEFAULT_PATIENCE, DEFAULT_THRES
 const OMAPILOT_PLUGIN_ID: &str = "io.github.spencerbull.omapilot";
 
 #[derive(Parser)]
-#[command(name = "novad", about = "NPU-accelerated wake word daemon for voxtype")]
+#[command(
+    name = "omarchy-novad",
+    about = "NPU-accelerated wake word daemon for voxtype"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -34,7 +37,7 @@ enum Command {
         threshold: f32,
         #[arg(long, default_value_t = DEFAULT_PATIENCE)]
         patience: usize,
-        /// Base URL of a running `novad serve` instance, used to
+        /// Base URL of a running `omarchy-novad serve` instance, used to
         /// classify each dictated utterance (see pipeline.rs). Only
         /// consulted under the standalone "voxtype" trigger — the
         /// omapilot/custom triggers below don't classify anything
@@ -48,7 +51,7 @@ enum Command {
         /// "voxtype" (the default): the standalone pipeline (see
         /// pipeline.rs) — `voxtype record start`, wait for it to
         /// auto-stop on its own silence-timeout and transcribe, then
-        /// classify and route the result, driving novad's popup
+        /// classify and route the result, driving omarchy-novad's popup
         /// through the whole thing.
         ///
         /// "omapilot": runs the same IPC action its own Super+A
@@ -57,7 +60,7 @@ enum Command {
         /// owns the rest of the flow (listening, the assistant
         /// conversation, dictation via voxtype internally). One
         /// shell-out per detection, no start/stop pairing or
-        /// classify/route/popup involvement on novad's side.
+        /// classify/route/popup involvement on omarchy-novad's side.
         ///
         /// Anything else is run verbatim as a shell command on
         /// detection, same one-shot semantics as "omapilot".
@@ -90,7 +93,7 @@ enum Command {
         what: SetupCommand,
     },
 
-    /// Send one action to a running `novad detect`'s standalone popup
+    /// Send one action to a running `omarchy-novad detect`'s standalone popup
     /// (approve/deny a pending command, insert/cancel a dictation
     /// review). Called by the popup's own button clicks via
     /// `Quickshell.Io.Process` — not normally run by hand.
@@ -101,12 +104,12 @@ enum Command {
 
     /// Cycle the standalone popup through sample states with no wake
     /// word / mic / model involved — for developing and testing the
-    /// QML popup in isolation. Waits for `novad respond approve|deny`
+    /// QML popup in isolation. Waits for `omarchy-novad respond approve|deny`
     /// during the Confirming phase; press Ctrl+C to stop.
     PopupDemo,
 
     /// Classify one utterance and print the result. Talks to a running
-    /// `novad serve` instance — no dedicated classifier model, see
+    /// `omarchy-novad serve` instance — no dedicated classifier model, see
     /// src/classify/mod.rs for why.
     Classify {
         text: String,
@@ -119,7 +122,7 @@ enum Command {
 
 #[derive(Subcommand)]
 enum SetupCommand {
-    /// Prepare a stock openWakeWord phrase for `novad detect` (fetches
+    /// Prepare a stock openWakeWord phrase for `omarchy-novad detect` (fetches
     /// the model and removes an ONNX If-node the NPU can't run, via a
     /// throwaway `uv`-managed Python env — nothing installed
     /// persistently). Not for training a new phrase — see the wake
@@ -196,9 +199,9 @@ fn run_popup_demo() -> anyhow::Result<()> {
     use std::time::Duration;
 
     let rx = ControlServer::spawn()?;
-    println!("[novad] Popup demo running. Launch the popup with:");
+    println!("[omarchy-novad] Popup demo running. Launch the popup with:");
     println!("  qs -p {}/quickshell", env!("CARGO_MANIFEST_DIR"));
-    println!("[novad] Ctrl+C to stop.\n");
+    println!("[omarchy-novad] Ctrl+C to stop.\n");
 
     loop {
         let steps: [(PopupPhase, &str, Option<&str>); 6] = [
@@ -223,7 +226,7 @@ fn run_popup_demo() -> anyhow::Result<()> {
         ];
 
         for (phase, text, confirm_label) in steps {
-            println!("[novad] phase -> {phase:?}");
+            println!("[omarchy-novad] phase -> {phase:?}");
             popup::write_state(&PopupState {
                 phase,
                 text: text.to_string(),
@@ -231,11 +234,11 @@ fn run_popup_demo() -> anyhow::Result<()> {
             });
 
             if phase == PopupPhase::Confirming {
-                println!("[novad] waiting for 'novad respond approve|deny'...");
+                println!("[omarchy-novad] waiting for 'omarchy-novad respond approve|deny'...");
                 match rx.recv() {
-                    Ok(PopupAction::Approve) => println!("[novad] approved"),
+                    Ok(PopupAction::Approve) => println!("[omarchy-novad] approved"),
                     Ok(PopupAction::Deny) => {
-                        println!("[novad] denied");
+                        println!("[omarchy-novad] denied");
                         popup::write_state(&PopupState {
                             phase: PopupPhase::Idle,
                             text: String::new(),
@@ -244,7 +247,9 @@ fn run_popup_demo() -> anyhow::Result<()> {
                         std::thread::sleep(Duration::from_secs(2));
                         continue;
                     }
-                    Ok(other) => println!("[novad] got {other:?} (expected approve/deny here)"),
+                    Ok(other) => {
+                        println!("[omarchy-novad] got {other:?} (expected approve/deny here)")
+                    }
                     Err(_) => return Ok(()),
                 }
             } else {
@@ -260,14 +265,14 @@ fn run_popup_demo() -> anyhow::Result<()> {
 fn serve_cache_dir() -> std::path::PathBuf {
     dirs::cache_dir()
         .unwrap_or_else(std::env::temp_dir)
-        .join("novad")
+        .join("omarchy-novad")
         .join("llm-cache")
 }
 
 fn cache_dir() -> std::path::PathBuf {
     dirs::cache_dir()
         .unwrap_or_else(std::env::temp_dir)
-        .join("novad")
+        .join("omarchy-novad")
         .join("wake-cache")
 }
 
@@ -286,14 +291,14 @@ fn resolve_trigger(on_detect: Option<String>) -> Trigger {
         Some(custom) => Trigger::OneShotCommand(custom.to_string()),
         None => {
             // Default: the standalone flow (voxtype dictation, and
-            // eventually novad's own classify/popup pipeline). Does
+            // eventually omarchy-novad's own classify/popup pipeline). Does
             // NOT auto-detect OmaPilot's plugin directory anymore --
             // that dir persists across a disable (uninstalling isn't
             // required to turn it off, see shell.json), so its mere
             // presence on disk was never a reliable "OmaPilot is what
             // I want" signal. Pass `--on-detect omapilot` explicitly
             // to opt back into it.
-            println!("[novad] wake word will trigger standalone voxtype dictation (pass --on-detect omapilot to use OmaPilot instead).");
+            println!("[omarchy-novad] wake word will trigger standalone voxtype dictation (pass --on-detect omapilot to use OmaPilot instead).");
             Trigger::VoxtypeDictation
         }
     }
@@ -316,8 +321,10 @@ fn run_detect(
     let detector = Detector::new(wakeword, device, &cache_dir(), threshold, patience)?;
     let mut listener = WakeWordListener::new(detector, None);
 
-    println!("[novad] Listening for '{wakeword}' (device={device}, threshold={threshold})...");
-    println!("[novad] Ctrl+C to stop.");
+    println!(
+        "[omarchy-novad] Listening for '{wakeword}' (device={device}, threshold={threshold})..."
+    );
+    println!("[omarchy-novad] Ctrl+C to stop.");
 
     // cpal mic capture -> mpsc channel -> chunked feed into the detector.
     // Kept off the audio callback thread: NPU inference (even ~2ms/frame)
@@ -361,7 +368,10 @@ fn run_detect(
             let chunk: Vec<i16> = pending.drain(..chunk_samples).collect();
 
             if let Some(detection) = listener.feed(&chunk)? {
-                println!("\n[novad] Wake word detected! score={:.3}", detection.score);
+                println!(
+                    "\n[omarchy-novad] Wake word detected! score={:.3}",
+                    detection.score
+                );
                 match &trigger {
                     // Blocks this thread for the whole session (record
                     // -> transcribe -> classify -> route -> popup) --
@@ -397,14 +407,14 @@ fn run_shell(cmd: &str) {
 
 /// Where the standalone pipeline tells voxtype to write each
 /// dictation's transcript (`voxtype record start --file=<path>`),
-/// scoped under novad's own runtime dir rather than voxtype's so a
+/// scoped under omarchy-novad's own runtime dir rather than voxtype's so a
 /// stale file from a crashed session can't be mistaken for voxtype's
 /// own state.
 fn transcript_path() -> std::path::PathBuf {
     let dir = std::env::var_os("XDG_RUNTIME_DIR")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(std::env::temp_dir)
-        .join("novad");
+        .join("omarchy-novad");
     let _ = std::fs::create_dir_all(&dir);
     dir.join("dictation.txt")
 }

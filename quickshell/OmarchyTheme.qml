@@ -19,7 +19,7 @@
 //   import "." as Novad
 //   Rectangle { color: Novad.OmarchyTheme.background }
 //
-// Falls back to Catppuccin Mocha (novad's original hardcoded palette,
+// Falls back to Catppuccin Mocha (omarchy-novad's original hardcoded palette,
 // nova's own look) when the file is missing or fails to parse, so a
 // non-Omarchy system or a mid-write torn read never leaves the popup
 // with blank/invalid colors.
@@ -77,7 +77,7 @@ QtObject {
     // see /usr/share/omarchy/themes/*/colors.toml for the full key
     // set this could read from) into a plain JS object. Ignores lines
     // that don't match rather than failing the whole parse -- a theme
-    // adding new keys in the future shouldn't break older novad
+    // adding new keys in the future shouldn't break older omarchy-novad
     // builds reading it.
     function parseFlatToml(text) {
         const result = {};

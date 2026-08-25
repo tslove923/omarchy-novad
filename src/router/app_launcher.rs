@@ -1,5 +1,5 @@
 //! Launch desktop applications. Port of nova-npu's
-//! `ai/commands/app_launcher.py`, Linux/Hyprland path only — novad has
+//! `ai/commands/app_launcher.py`, Linux/Hyprland path only — omarchy-novad has
 //! no Windows target, unlike nova.
 
 use std::process::{Command, Stdio};

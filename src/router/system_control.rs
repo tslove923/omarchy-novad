@@ -1,7 +1,7 @@
 //! Volume and brightness control. Port of nova-npu's
 //! `ai/commands/system_control.py`, Linux path only (`wpctl` /
 //! `brightnessctl` — both confirmed present on this system; nova's
-//! Windows backends via nircmd/pycaw have no novad equivalent).
+//! Windows backends via nircmd/pycaw have no omarchy-novad equivalent).
 
 use std::process::Command;
 

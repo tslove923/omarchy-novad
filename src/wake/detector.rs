@@ -141,7 +141,7 @@ impl Detector {
     }
 
     // Not wired to a CLI flag yet — mirrors nova's `Detector.info`
-    // diagnostic property; will back a `novad detect --stats` flag.
+    // diagnostic property; will back a `omarchy-novad detect --stats` flag.
     #[allow(dead_code)]
     pub fn avg_inference_ms(&self) -> f32 {
         if self.inference_times.is_empty() {

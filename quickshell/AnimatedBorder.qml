@@ -30,11 +30,11 @@
 //   - "ready": one flash-and-fade — full opacity + glow easing to 30%
 //     opacity / no glow over 1.2s (CSS: result-flash, forwards), green glow
 //   - "breathing": three slow opacity pulses, accent glow (nova's edit-
-//     window / waiting look; not currently reached by any novad
+//     window / waiting look; not currently reached by any omarchy-novad
 //     PopupPhase, kept for a future phase that wants it)
 //   - "confirming": ring static (no spin) at reduced opacity, yellow
 //     glow — nova's CSS reused "rotating" here ("mic is active during
-//     confirm" in the Electron build), but novad's Confirming phase
+//     confirm" in the Electron build), but omarchy-novad's Confirming phase
 //     isn't listening for anything (see PopupState.qml), so a
 //     spinning ring would misleadingly suggest it's still recording.
 //   - "idle" (or unrecognized): ring and glow hidden.

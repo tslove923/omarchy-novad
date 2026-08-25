@@ -5,10 +5,10 @@
 //! `MeetingControls.qml`), just with richer state than a single word:
 //!
 //! - **Daemon -> UI**: this module serializes [`PopupState`] to a JSON
-//!   file at `$XDG_RUNTIME_DIR/novad/popup-state.json` on every state
+//!   file at `$XDG_RUNTIME_DIR/omarchy-novad/popup-state.json` on every state
 //!   change. The QML side watches it with `Quickshell.Io.FileView`
 //!   (`watchChanges: true`), same mechanism as voxtype's `StateReader`.
-//! - **UI -> daemon**: button clicks in the popup run `novad respond
+//! - **UI -> daemon**: button clicks in the popup run `omarchy-novad respond
 //!   <action>` via `Quickshell.Io.Process`, same mechanism as
 //!   `MeetingControls.qml`'s `voxtype meeting show` calls. That
 //!   subprocess connects to a Unix socket this module's [`ControlServer`]
@@ -16,7 +16,7 @@
 //!
 //! No WebSocket, no HTTP, no bearer tokens — nova-npu's Electron app
 //! needed those because Electron and the Python service were two
-//! separate processes with no shared filesystem convention. novad and
+//! separate processes with no shared filesystem convention. omarchy-novad and
 //! its own popup are both native to this daemon; a JSON file and a
 //! Unix socket are enough.
 
@@ -30,7 +30,7 @@ use serde::Serialize;
 /// Mirrors nova's popup.js state machine (`idle`, `listening`,
 /// `recording`, `transcribing`, `classifying`, `confirming`, `ready`),
 /// plus `handing_off` -- novad-specific, no nova equivalent (nova's
-/// OpenClaw handoff reused its "processing"/strobing state; novad
+/// OpenClaw handoff reused its "processing"/strobing state; omarchy-novad
 /// gives it a distinct phase since it runs meaningfully longer than
 /// local classification and deserves its own status label).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -76,13 +76,13 @@ pub fn control_socket_path() -> PathBuf {
 }
 
 fn runtime_dir() -> PathBuf {
-    // Same fallback shape as the rest of novad (cache_dir(), etc.):
+    // Same fallback shape as the rest of omarchy-novad (cache_dir(), etc.):
     // prefer XDG_RUNTIME_DIR, fall back to the system temp dir rather
     // than trying to reconstruct /run/user/<uid> ourselves.
     let dir = std::env::var_os("XDG_RUNTIME_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(std::env::temp_dir)
-        .join("novad");
+        .join("omarchy-novad");
     let _ = std::fs::create_dir_all(&dir);
     dir
 }
@@ -125,7 +125,7 @@ impl PopupAction {
     }
 }
 
-/// Listens on `control_socket_path()` for one-line actions from `novad
+/// Listens on `control_socket_path()` for one-line actions from `omarchy-novad
 /// respond <action>` and forwards them to `sender`. Runs until the
 /// listener errors (process teardown); intended to run on its own
 /// thread from the daemon's main loop.
@@ -165,15 +165,16 @@ fn read_one_action(stream: UnixStream) -> Option<PopupAction> {
     action
 }
 
-/// `novad respond <action>` entry point: connect to the running
+/// `omarchy-novad respond <action>` entry point: connect to the running
 /// daemon's control socket and send one action, then exit.
 pub fn respond(action: &str) -> anyhow::Result<()> {
     if PopupAction::parse(action).is_none() {
         anyhow::bail!("unknown action '{action}' (expected: insert, cancel, approve, deny)");
     }
     let path = control_socket_path();
-    let mut stream = UnixStream::connect(&path)
-        .map_err(|e| anyhow::anyhow!("connect to {path:?}: {e} (is 'novad detect' running?)"))?;
+    let mut stream = UnixStream::connect(&path).map_err(|e| {
+        anyhow::anyhow!("connect to {path:?}: {e} (is 'omarchy-novad detect' running?)")
+    })?;
     writeln!(stream, "{action}")?;
     Ok(())
 }

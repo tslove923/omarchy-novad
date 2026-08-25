@@ -1,8 +1,8 @@
-// novad daemon popup-state file watcher.
+// omarchy-novad daemon popup-state file watcher.
 //
 // Same mechanism as voxtype's StateReader.qml (FileView, watchChanges),
-// just parsing JSON since novad's popup needs more than a single state
-// word: { phase, text, confirm_label? }.
+// just parsing JSON since omarchy-novad's popup needs more than a
+// single state word: { phase, text, confirm_label? }.
 //
 // Usage:
 //   PopupState { id: popupState }
@@ -18,7 +18,7 @@ QtObject {
     property string statePath: {
         const xdg = Quickshell.env("XDG_RUNTIME_DIR");
         const base = (xdg && xdg.length > 0) ? xdg : "/tmp";
-        return base + "/novad/popup-state.json";
+        return base + "/omarchy-novad/popup-state.json";
     }
 
     // Individual properties rather than one "state" object so QML

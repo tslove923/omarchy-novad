@@ -1,15 +1,17 @@
 //! OpenAI-compatible HTTP server backed by `openvino_genai::LlmPipeline`.
 //!
-//! Exists so OmaPilot (or anything else that speaks the OpenAI Chat
-//! Completions API) can point at a fully local, GPU-backed model —
-//! `docs/omapilot-local-provider.md` registers this as an OmaPilot
-//! `models.json` provider. Replaces the earlier Ollama-based plan:
-//! Ollama already speaks this API natively, so pointing OmaPilot at our
-//! own OpenVINO GenAI pipeline instead means novad has to speak it too.
+//! Exists so `classify` (see src/classify/mod.rs), OmaPilot, or
+//! anything else that speaks the OpenAI Chat Completions API can
+//! point at a fully local, GPU-backed model. Also usable as an
+//! OmaPilot `models.json` provider by hand (register a
+//! `openai-completions` entry pointing at this server's `/v1`) --
+//! replaces the earlier Ollama-based plan: Ollama already speaks this
+//! API natively, so pointing OmaPilot at our own OpenVINO GenAI
+//! pipeline instead means omarchy-novad has to speak it too.
 //!
 //! Scope: single model, single in-process pipeline. No auth (binds to
 //! 127.0.0.1 — same trust boundary as Ollama's own default). Good
-//! enough for "OmaPilot/Pi on this machine talks to novad on this
+//! enough for "OmaPilot/Pi on this machine talks to omarchy-novad on this
 //! machine"; revisit if that stops being true.
 //!
 //! Streaming (`stream: true`) is required, not optional, in practice —
@@ -106,11 +108,17 @@ pub async fn run(config: ServeConfig) -> anyhow::Result<()> {
     let addr = format!("127.0.0.1:{}", config.port);
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     tracing::info!(
-        "novad serve listening on http://{addr}  (model id: {})",
+        "omarchy-novad serve listening on http://{addr}  (model id: {})",
         config.model_id
     );
-    println!("[novad] Serving {} at http://{addr}/v1", config.model_id);
-    println!("[novad] Point OmaPilot's models.json baseUrl at http://{addr}/v1 — see docs/omapilot-local-provider.md");
+    println!(
+        "[omarchy-novad] Serving {} at http://{addr}/v1",
+        config.model_id
+    );
+    println!(
+        "[omarchy-novad] Point 'omarchy-novad detect --classify-base-url http://{addr}' \
+         (or OmaPilot's models.json baseUrl) at http://{addr}/v1"
+    );
 
     axum::serve(listener, app).await?;
     Ok(())
@@ -272,7 +280,7 @@ struct ErrorDetail {
 async fn list_models(State(state): State<std::sync::Arc<AppState>>) -> impl IntoResponse {
     Json(serde_json::json!({
         "object": "list",
-        "data": [{"id": state.model_id, "object": "model", "owned_by": "novad"}],
+        "data": [{"id": state.model_id, "object": "model", "owned_by": "omarchy-novad"}],
     }))
 }
 
@@ -414,7 +422,7 @@ async fn chat_completions_streaming(
                 &model_id,
                 ChunkDelta {
                     role: Some("assistant"),
-                    content: Some(format!("[novad error: {e}]")),
+                    content: Some(format!("[omarchy-novad error: {e}]")),
                     tool_calls: None,
                 },
                 Some("stop"),

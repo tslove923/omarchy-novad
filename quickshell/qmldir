@@ -2,6 +2,6 @@ module qs
 
 singleton OmarchyTheme 1.0 OmarchyTheme.qml
 AnimatedBorder 1.0 AnimatedBorder.qml
-NovadPopup 1.0 NovadPopup.qml
+OmarchyNovadPopup 1.0 OmarchyNovadPopup.qml
 PopupButton 1.0 PopupButton.qml
 PopupState 1.0 PopupState.qml

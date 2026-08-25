@@ -6,7 +6,7 @@
 //! One session per wake-word detection, run synchronously on the
 //! detect loop's own thread (see `main.rs::run_detect`) -- unlike
 //! nova's Python, which ran this on a background thread so the Qt/
-//! Electron UI thread stayed responsive, novad's popup is a separate
+//! Electron UI thread stayed responsive, omarchy-novad's popup is a separate
 //! process (Quickshell) driven entirely by the `PopupState` file, so
 //! there's no UI thread to keep unblocked here. Wake-word detection
 //! itself is naturally paused for the session's duration since the

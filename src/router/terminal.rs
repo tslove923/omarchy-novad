@@ -1,7 +1,7 @@
 //! Execute shell commands from voice input. Port of nova-npu's
 //! `ai/commands/terminal.py`, Linux patterns only (nova also blocked
 //! several Windows-specific dangerous patterns and allowlisted several
-//! PowerShell read-only cmdlets; novad has no Windows target).
+//! PowerShell read-only cmdlets; omarchy-novad has no Windows target).
 //!
 //! Terminal commands always require user confirmation in the popup
 //! before execution, UNLESS they match [`is_safe_readonly`] -- see
@@ -15,7 +15,7 @@ use std::time::Duration;
 /// Dangerous patterns blocked unconditionally, regardless of
 /// confirmation -- these never reach the popup at all, matching
 /// nova's `is_blocked` gate inside `run_terminal` itself. Checked as
-/// plain substring/prefix tests rather than regex: novad has no
+/// plain substring/prefix tests rather than regex: omarchy-novad has no
 /// regex crate dependency yet and every one of nova's patterns here
 /// is expressible without one (word-boundary regexes like `\bsudo\b`
 /// become "contains sudo as a whole word", checked via

@@ -3,8 +3,9 @@
 //! This is deliberately *not* a port of nova-npu's `model_converter.py`.
 //! That file does real ONNX graph surgery (removing an If-node) using
 //! Python's `onnx` package — a one-time offline step, not something
-//! novad needs to redo at runtime (`scripts/convert-wake-model.local.py`
-//! runs it once via `uv`, no persistent Python install needed).
+//! omarchy-novad needs to redo at runtime (`omarchy-novad setup
+//! wake-model`, see wake/setup.rs, runs an equivalent conversion once
+//! via a throwaway `uv` env, no persistent Python install needed).
 //!
 //! The files stay plain `.onnx`, not OpenVINO IR (`.xml`/`.bin`) —
 //! `openvino::Core::read_model_from_file` reads ONNX directly via
@@ -24,11 +25,11 @@ pub struct WakeModelPaths {
     pub wakeword: PathBuf,
 }
 
-/// `$XDG_DATA_HOME/novad/wake-models` (falls back to `~/.local/share`).
+/// `$XDG_DATA_HOME/omarchy-novad/wake-models` (falls back to `~/.local/share`).
 pub fn wake_models_dir() -> PathBuf {
     dirs::data_dir()
         .unwrap_or_else(std::env::temp_dir)
-        .join("novad")
+        .join("omarchy-novad")
         .join("wake-models")
 }
 

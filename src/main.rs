@@ -1,5 +1,7 @@
 mod classify;
+mod pipeline;
 mod popup;
+mod router;
 mod serve;
 mod wake;
 
@@ -32,24 +34,30 @@ enum Command {
         threshold: f32,
         #[arg(long, default_value_t = DEFAULT_PATIENCE)]
         patience: usize,
-        /// Seconds of near-silence after speech before auto-stopping a
-        /// plain voxtype recording. Not used for the omapilot/custom
-        /// triggers below — those own their own session lifecycle.
-        #[arg(long, default_value_t = 1.5)]
-        silence_timeout_secs: f32,
+        /// Base URL of a running `novad serve` instance, used to
+        /// classify each dictated utterance (see pipeline.rs). Only
+        /// consulted under the standalone "voxtype" trigger — the
+        /// omapilot/custom triggers below don't classify anything
+        /// themselves.
+        #[arg(long, default_value = "http://127.0.0.1:8420")]
+        classify_base_url: String,
+        #[arg(long, default_value = "qwen3-1.7b-instruct")]
+        classify_model_id: String,
         /// What the wake word triggers.
         ///
-        /// "voxtype" (default when OmaPilot isn't installed): plain
-        /// dictation — `voxtype record start`, then `record stop` on
-        /// the silence timeout above.
+        /// "voxtype" (the default): the standalone pipeline (see
+        /// pipeline.rs) — `voxtype record start`, wait for it to
+        /// auto-stop on its own silence-timeout and transcribe, then
+        /// classify and route the result, driving novad's popup
+        /// through the whole thing.
         ///
-        /// "omapilot" (default when OmaPilot's plugin dir is present):
-        /// runs the same IPC action its own Super+A keybind uses
-        /// (`omarchy-shell -q io.github.spencerbull.omapilot
-        /// voiceToggle`) — OmaPilot owns the rest of the flow
-        /// (listening, the assistant conversation, dictation via
-        /// voxtype internally). One shell-out per detection, no
-        /// start/stop pairing on novad's side.
+        /// "omapilot": runs the same IPC action its own Super+A
+        /// keybind uses (`omarchy-shell -q
+        /// io.github.spencerbull.omapilot voiceToggle`) — OmaPilot
+        /// owns the rest of the flow (listening, the assistant
+        /// conversation, dictation via voxtype internally). One
+        /// shell-out per detection, no start/stop pairing or
+        /// classify/route/popup involvement on novad's side.
         ///
         /// Anything else is run verbatim as a shell command on
         /// detection, same one-shot semantics as "omapilot".
@@ -134,14 +142,16 @@ fn main() -> anyhow::Result<()> {
             device,
             threshold,
             patience,
-            silence_timeout_secs,
+            classify_base_url,
+            classify_model_id,
             on_detect,
         } => run_detect(
             &wakeword,
             &device,
             threshold,
             patience,
-            silence_timeout_secs,
+            &classify_base_url,
+            &classify_model_id,
             on_detect,
         ),
         Command::Serve {
@@ -298,7 +308,8 @@ fn run_detect(
     device: &str,
     threshold: f32,
     patience: usize,
-    silence_timeout_secs: f32,
+    classify_base_url: &str,
+    classify_model_id: &str,
     on_detect: Option<String>,
 ) -> anyhow::Result<()> {
     let trigger = resolve_trigger(on_detect);
@@ -333,56 +344,37 @@ fn run_detect(
     )?;
     stream.play()?;
 
+    let pipeline_cfg = pipeline::PipelineConfig {
+        classify_base_url: classify_base_url.to_string(),
+        classify_model_id: classify_model_id.to_string(),
+        voxtype_binary: "voxtype".to_string(),
+        transcript_path: transcript_path(),
+        voxtype_state_path: voxtype_state_path(),
+    };
+
     let chunk_samples = listener.chunk_samples();
     let mut pending: Vec<i16> = Vec::with_capacity(chunk_samples * 2);
-    let mut recording = false; // only meaningful for Trigger::VoxtypeDictation
-    let mut last_speech = std::time::Instant::now();
-    let silence_timeout = std::time::Duration::from_secs_f32(silence_timeout_secs);
 
     for samples in rx {
         pending.extend_from_slice(&samples);
         while pending.len() >= chunk_samples {
             let chunk: Vec<i16> = pending.drain(..chunk_samples).collect();
 
-            if !recording {
-                if let Some(detection) = listener.feed(&chunk)? {
-                    println!("\n[novad] Wake word detected! score={:.3}", detection.score);
-                    match &trigger {
-                        Trigger::VoxtypeDictation => {
-                            if let Err(e) = std::process::Command::new("voxtype")
-                                .args(["record", "start"])
-                                .status()
-                            {
-                                tracing::error!("failed to run 'voxtype record start': {e}");
-                                continue;
-                            }
-                            recording = true;
-                            last_speech = std::time::Instant::now();
-                        }
-                        Trigger::OneShotCommand(cmd) => {
-                            run_shell(cmd);
-                            listener.reset();
-                        }
-                    }
+            if let Some(detection) = listener.feed(&chunk)? {
+                println!("\n[novad] Wake word detected! score={:.3}", detection.score);
+                match &trigger {
+                    // Blocks this thread for the whole session (record
+                    // -> transcribe -> classify -> route -> popup) --
+                    // deliberately: it means no audio chunk is fed to
+                    // the detector while a session is already running,
+                    // so there's no risk of double-triggering on the
+                    // recording's own audio the way a non-blocking
+                    // design would need extra state to prevent. Queued
+                    // mic samples just wait in `rx` until this returns.
+                    Trigger::VoxtypeDictation => pipeline::run_session(&pipeline_cfg),
+                    Trigger::OneShotCommand(cmd) => run_shell(cmd),
                 }
-            } else {
-                // Cheap RMS gate for the silence-timeout — not a real
-                // VAD, just enough to know "still talking" vs "quiet".
-                // Only reached under Trigger::VoxtypeDictation.
-                let rms = rms_i16(&chunk);
-                if rms > 300.0 {
-                    last_speech = std::time::Instant::now();
-                }
-                if last_speech.elapsed() >= silence_timeout {
-                    if let Err(e) = std::process::Command::new("voxtype")
-                        .args(["record", "stop"])
-                        .status()
-                    {
-                        tracing::error!("failed to run 'voxtype record stop': {e}");
-                    }
-                    recording = false;
-                    listener.reset();
-                }
+                listener.reset();
             }
         }
     }
@@ -403,10 +395,28 @@ fn run_shell(cmd: &str) {
     }
 }
 
-fn rms_i16(samples: &[i16]) -> f32 {
-    if samples.is_empty() {
-        return 0.0;
-    }
-    let sum_sq: f64 = samples.iter().map(|&s| (s as f64) * (s as f64)).sum();
-    ((sum_sq / samples.len() as f64).sqrt()) as f32
+/// Where the standalone pipeline tells voxtype to write each
+/// dictation's transcript (`voxtype record start --file=<path>`),
+/// scoped under novad's own runtime dir rather than voxtype's so a
+/// stale file from a crashed session can't be mistaken for voxtype's
+/// own state.
+fn transcript_path() -> std::path::PathBuf {
+    let dir = std::env::var_os("XDG_RUNTIME_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir)
+        .join("novad");
+    let _ = std::fs::create_dir_all(&dir);
+    dir.join("dictation.txt")
+}
+
+/// voxtype's own state file (`"idle"` / `"recording"` /
+/// `"transcribing"` / `"streaming"`) -- see voxtype's
+/// `state_file = "auto"` config default, which resolves to exactly
+/// this path.
+fn voxtype_state_path() -> std::path::PathBuf {
+    std::env::var_os("XDG_RUNTIME_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir)
+        .join("voxtype")
+        .join("state")
 }

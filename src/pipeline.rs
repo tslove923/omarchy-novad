@@ -1,0 +1,198 @@
+//! The standalone wake-word -> dictation -> classify -> route -> popup
+//! flow. Port of nova-npu's `tray/tray_app.py` `CoreProcessThread`
+//! (record -> transcribe -> route), scoped to what `router` (see
+//! router/mod.rs) actually implements.
+//!
+//! One session per wake-word detection, run synchronously on the
+//! detect loop's own thread (see `main.rs::run_detect`) -- unlike
+//! nova's Python, which ran this on a background thread so the Qt/
+//! Electron UI thread stayed responsive, novad's popup is a separate
+//! process (Quickshell) driven entirely by the `PopupState` file, so
+//! there's no UI thread to keep unblocked here. Wake-word detection
+//! itself is naturally paused for the session's duration since the
+//! caller doesn't feed it more audio until this returns.
+
+use std::path::PathBuf;
+use std::time::{Duration, Instant};
+
+use crate::classify::Classifier;
+use crate::popup::{self, PopupAction, PopupPhase, PopupState};
+use crate::router::{self, RouteResult};
+
+/// How often to poll voxtype's state file while waiting for it to
+/// finish recording/transcribing. voxtype's own silence-timeout
+/// (`external_trigger_silence_timeout_secs` in its config.toml)
+/// decides when a recording actually ends -- this loop just watches
+/// for that, it doesn't do its own silence detection like the
+/// earlier RMS-gate approach in VoxtypeDictation's caller did before
+/// this module existed.
+const POLL_INTERVAL: Duration = Duration::from_millis(100);
+
+/// Hard ceiling on how long one session (record + transcribe) is
+/// allowed to run before giving up -- a safety net if voxtype's own
+/// max_duration_secs cap and silence-timeout somehow both fail to
+/// return it to idle. Generous: transcription of a long recording on
+/// a loaded NPU can legitimately take several seconds.
+const SESSION_TIMEOUT: Duration = Duration::from_secs(90);
+
+pub struct PipelineConfig {
+    pub classify_base_url: String,
+    pub classify_model_id: String,
+    pub voxtype_binary: String,
+    pub transcript_path: PathBuf,
+    pub voxtype_state_path: PathBuf,
+}
+
+/// Run one full session after a wake-word detection: start voxtype
+/// recording to a known file, wait for it to finish (record + auto
+/// transcribe, driven by voxtype's own silence-timeout), classify the
+/// result, route it, and drive the popup through the whole thing.
+///
+/// Every early-return path leaves the popup back at `Idle` before
+/// returning, so the caller never has to clean up popup state itself.
+pub fn run_session(cfg: &PipelineConfig) {
+    popup::write_state(&PopupState {
+        phase: PopupPhase::Recording,
+        text: String::new(),
+        confirm_label: None,
+    });
+
+    if let Err(e) = start_recording(cfg) {
+        tracing::error!("[pipeline] failed to start recording: {e}");
+        popup::write_state(&PopupState::default());
+        return;
+    }
+
+    if !wait_for_idle(cfg) {
+        tracing::warn!("[pipeline] session timed out waiting for voxtype to return to idle");
+        popup::write_state(&PopupState::default());
+        return;
+    }
+
+    let transcript = match std::fs::read_to_string(&cfg.transcript_path) {
+        Ok(s) => s.trim().to_string(),
+        Err(e) => {
+            tracing::error!(
+                "[pipeline] failed to read transcript at {:?}: {e}",
+                cfg.transcript_path
+            );
+            popup::write_state(&PopupState::default());
+            return;
+        }
+    };
+
+    if transcript.is_empty() {
+        tracing::debug!("[pipeline] empty transcript, nothing to do");
+        popup::write_state(&PopupState::default());
+        return;
+    }
+
+    popup::write_state(&PopupState {
+        phase: PopupPhase::Classifying,
+        text: transcript.clone(),
+        confirm_label: None,
+    });
+
+    let classifier = Classifier::new(cfg.classify_base_url.clone(), cfg.classify_model_id.clone());
+    let result = match classifier.classify(&transcript) {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!(
+                "[pipeline] classification failed: {e} -- showing raw transcript instead"
+            );
+            show_ready_and_wait(&transcript);
+            return;
+        }
+    };
+
+    tracing::info!(
+        "[pipeline] intent={} argument={:?} ({:.2}s)",
+        result.intent,
+        result.argument,
+        result.latency.as_secs_f32()
+    );
+
+    match router::route(result.intent, &result.argument) {
+        RouteResult::Done { success, message } => {
+            tracing::info!("[pipeline] routed: success={success} message={message:?}");
+            show_ready_and_wait(&message);
+        }
+        RouteResult::NeedsConfirmation { preview } => {
+            popup::write_state(&PopupState {
+                phase: PopupPhase::Confirming,
+                text: preview.clone(),
+                confirm_label: Some(preview.clone()),
+            });
+            match wait_for_action() {
+                Some(PopupAction::Approve) => {
+                    let (_ok, message) = router::run_confirmed_terminal(&result.argument);
+                    show_ready_and_wait(&message);
+                }
+                _ => popup::write_state(&PopupState::default()),
+            }
+        }
+        RouteResult::Unhandled => {
+            // No local handler for this intent -- fall back to
+            // treating it as plain dictation text the user can review
+            // and insert, same as nova's edit-window path for
+            // anything the router couldn't act on.
+            show_ready_and_wait(&transcript);
+        }
+    }
+}
+
+fn start_recording(cfg: &PipelineConfig) -> std::io::Result<()> {
+    // Best-effort: stale content from a previous session shouldn't be
+    // mistaken for this one's transcript if voxtype fails to write a
+    // fresh one for some reason.
+    let _ = std::fs::remove_file(&cfg.transcript_path);
+
+    let file_arg = format!("--file={}", cfg.transcript_path.display());
+    let status = std::process::Command::new(&cfg.voxtype_binary)
+        .args(["record", "start", &file_arg])
+        .status()?;
+    if !status.success() {
+        return Err(std::io::Error::other(format!(
+            "voxtype record start exited with {status}"
+        )));
+    }
+    Ok(())
+}
+
+/// Polls voxtype's state file until it reads "idle" (recording and
+/// any transcription finished) or `SESSION_TIMEOUT` elapses. Returns
+/// false on timeout.
+fn wait_for_idle(cfg: &PipelineConfig) -> bool {
+    let start = Instant::now();
+    loop {
+        if start.elapsed() >= SESSION_TIMEOUT {
+            return false;
+        }
+        match std::fs::read_to_string(&cfg.voxtype_state_path) {
+            Ok(s) if s.trim() == "idle" => return true,
+            _ => std::thread::sleep(POLL_INTERVAL),
+        }
+    }
+}
+
+fn show_ready_and_wait(text: &str) {
+    popup::write_state(&PopupState {
+        phase: PopupPhase::Ready,
+        text: text.to_string(),
+        confirm_label: None,
+    });
+    // Ready is dismiss-on-timeout, not dismiss-on-action -- nova's own
+    // popup auto-hid the result after a few seconds rather than
+    // waiting on a button (Insert/Cancel are there for the user to
+    // act sooner if they want, see NovadPopup.qml's review bar).
+    std::thread::sleep(Duration::from_secs(4));
+    popup::write_state(&PopupState::default());
+}
+
+/// Blocks for one `PopupAction` from the popup's control socket, or
+/// gives up after a while so an unattended confirmation prompt
+/// doesn't hang the whole detect loop forever.
+fn wait_for_action() -> Option<PopupAction> {
+    let rx = popup::ControlServer::spawn().ok()?;
+    rx.recv_timeout(Duration::from_secs(30)).ok()
+}

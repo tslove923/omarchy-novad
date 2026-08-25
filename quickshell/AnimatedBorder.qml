@@ -16,21 +16,27 @@
 // NovadPopup.qml) so the card's own opaque fill covers the hole,
 // leaving only the ring-and-glow frame visible around it.
 //
-// Animation per mode, matching nova's CSS keyframes:
-//   - "recording": gradient spins at 40deg/s (9s/revolution), blue glow
+// Colors: the gradient stops and every glow color come from
+// OmarchyTheme (see OmarchyTheme.qml), matching NovadPopup.qml's own
+// palette instead of nova's original fixed blue/purple/pink Arc
+// brand colors -- so the whole popup, ring included, re-themes
+// together on `omarchy theme set`.
+//
+// Animation per mode (durations/curves still match nova's CSS
+// keyframes exactly; only the colors changed):
+//   - "recording": gradient spins at 40deg/s (9s/revolution), accent glow
 //   - "transcribing"/"classifying": opacity strobes 0.4<->1.0 twice a
-//     second, purple glow
+//     second, magenta glow
 //   - "ready": one flash-and-fade — full opacity + glow easing to 30%
-//     opacity / no glow over 1.2s (CSS: result-flash, forwards)
-//   - "breathing": three slow opacity pulses, blue glow (nova's edit-
+//     opacity / no glow over 1.2s (CSS: result-flash, forwards), green glow
+//   - "breathing": three slow opacity pulses, accent glow (nova's edit-
 //     window / waiting look; not currently reached by any novad
 //     PopupPhase, kept for a future phase that wants it)
-//   - "confirming": ring static (no spin) at reduced opacity, amber
-//     glow — nova's CSS reused
-//     "rotating" here ("mic is active during confirm" in the Electron
-//     build), but novad's Confirming phase isn't listening for
-//     anything (see PopupState.qml), so a spinning ring would
-//     misleadingly suggest it's still recording.
+//   - "confirming": ring static (no spin) at reduced opacity, yellow
+//     glow — nova's CSS reused "rotating" here ("mic is active during
+//     confirm" in the Electron build), but novad's Confirming phase
+//     isn't listening for anything (see PopupState.qml), so a
+//     spinning ring would misleadingly suggest it's still recording.
 //   - "idle" (or unrecognized): ring and glow hidden.
 
 import QtQuick
@@ -86,11 +92,15 @@ Item {
         property real spinAngle: 0
 
         angle: spinAngle
+        // Three-stop loop through the theme's accent/magenta/red so
+        // the ring always resolves back to its starting color at
+        // position 1.0 (same shape as nova's original three-hue Arc
+        // gradient) instead of introducing a visible seam.
         gradient: Gradient {
-            GradientStop { position: 0.0; color: "#0294f2" }
-            GradientStop { position: 0.5; color: "#5d13df" }
-            GradientStop { position: 0.85; color: "#eb31e9" }
-            GradientStop { position: 1.0; color: "#0294f2" }
+            GradientStop { position: 0.0; color: OmarchyTheme.accent }
+            GradientStop { position: 0.5; color: OmarchyTheme.magenta }
+            GradientStop { position: 0.85; color: OmarchyTheme.red }
+            GradientStop { position: 1.0; color: OmarchyTheme.accent }
         }
 
         RotationAnimation on spinAngle {
@@ -123,14 +133,21 @@ Item {
         visible: root.active
     }
 
+    // Applies an alpha to one of OmarchyTheme's colors -- same
+    // per-mode alpha values nova's CSS used (0.35..0.8), just against
+    // theme colors instead of literal RGB triples.
+    function withAlpha(color, alpha) {
+        return Qt.rgba(color.r, color.g, color.b, alpha);
+    }
+
     function glowColorFor(m) {
         switch (m) {
-        case "recording": return Qt.rgba(2 / 255, 148 / 255, 242 / 255, 0.4);
+        case "recording": return withAlpha(OmarchyTheme.accent, 0.4);
         case "transcribing":
-        case "classifying": return Qt.rgba(93 / 255, 19 / 255, 223 / 255, 0.5);
-        case "ready": return Qt.rgba(166 / 255, 227 / 255, 161 / 255, 0.8);
-        case "breathing": return Qt.rgba(137 / 255, 180 / 255, 250 / 255, 0.6);
-        case "confirming": return Qt.rgba(250 / 255, 179 / 255, 135 / 255, 0.35);
+        case "classifying": return withAlpha(OmarchyTheme.magenta, 0.5);
+        case "ready": return withAlpha(OmarchyTheme.green, 0.8);
+        case "breathing": return withAlpha(OmarchyTheme.accent, 0.6);
+        case "confirming": return withAlpha(OmarchyTheme.yellow, 0.35);
         default: return Qt.rgba(0, 0, 0, 0);
         }
     }

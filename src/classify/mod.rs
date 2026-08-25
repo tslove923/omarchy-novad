@@ -101,6 +101,23 @@ MEMORY_RETURN, CODING, EXTERNAL. Respond with ONLY two lines, no other text:\n\
 INTENT: <name>\n\
 ARGUMENT: <extracted argument text>";
 
+/// Generation budget for a classification call. Thinking-mode models
+/// (Qwen3's default chat template) emit a `<think>...</think>` block
+/// before the actual answer unless suppressed — see `/no_think` below
+/// and `strip_thinking`. 32 was sized for a non-thinking model and
+/// truncated Qwen3-1.7B mid-thought every time even with `/no_think`
+/// appended, so this covers worst-case reasoning tokens too, not just
+/// the two-line answer.
+const MAX_TOKENS: usize = 256;
+
+/// Qwen3's soft-switch to skip the `<think>` block for this turn,
+/// appended to the user message content per Qwen's own convention
+/// (it's a per-turn directive, not a system-prompt one). Belt-and-
+/// suspenders with `strip_thinking`: some quantized/converted variants
+/// don't honor it reliably, so the parser also strips any `<think>`
+/// block that slips through instead of relying on this alone.
+const NO_THINK_SUFFIX: &str = "\n/no_think";
+
 pub struct Classifier {
     base_url: String,
     model_id: String,
@@ -123,6 +140,7 @@ impl Classifier {
             self.base_url.trim_end_matches('/')
         );
 
+        let user_content = format!("{utterance}{NO_THINK_SUFFIX}");
         let req = ChatRequest {
             model: &self.model_id,
             messages: vec![
@@ -132,10 +150,10 @@ impl Classifier {
                 },
                 ChatMessage {
                     role: "user",
-                    content: utterance,
+                    content: &user_content,
                 },
             ],
-            max_tokens: 32,
+            max_tokens: MAX_TOKENS,
             temperature: 0.0,
         };
 
@@ -157,10 +175,26 @@ impl Classifier {
     }
 }
 
+/// Removes a leading `<think>...</think>` reasoning block, if present.
+/// `/no_think` (see `NO_THINK_SUFFIX`) usually prevents the model from
+/// emitting one at all, but isn't honored by every quantized/converted
+/// variant, so the parser strips it defensively rather than trusting
+/// the directive alone. Only strips a block anchored at the very start
+/// (after whitespace) — content that merely mentions "<think>" further
+/// in isn't touched.
+fn strip_thinking(content: &str) -> &str {
+    let trimmed = content.trim_start();
+    match trimmed.strip_prefix("<think>") {
+        Some(rest) => rest.split_once("</think>").map_or(rest, |(_, after)| after),
+        None => trimmed,
+    }
+}
+
 fn parse_response(
     content: &str,
     latency: std::time::Duration,
 ) -> Result<ClassificationResult, ClassifyError> {
+    let content = strip_thinking(content);
     let mut intent_str = None;
     let mut argument = String::new();
     for line in content.lines() {
@@ -216,6 +250,17 @@ struct ChatMessageOwned {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn strips_leading_think_block() {
+        let result = parse_response(
+            "<think>\nThe user wants to open an app.\n</think>\n\nINTENT: OPEN_APP\nARGUMENT: firefox",
+            std::time::Duration::from_millis(1),
+        )
+        .unwrap();
+        assert_eq!(result.intent, Intent::OpenApp);
+        assert_eq!(result.argument, "firefox");
+    }
 
     #[test]
     fn parses_well_formed_response() {

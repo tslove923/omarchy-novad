@@ -57,26 +57,33 @@ PanelWindow {
         height: card.height
     }
 
-    // ── Palette (Catppuccin Mocha, matching nova's original popup —
-    //    not Omarchy-theme-driven yet; see roadmap for follow-up) ──
-    readonly property color bgColor: "#1e1e2e"
-    readonly property color textColor: "#cdd6f4"
-    readonly property color labelColor: "#a6adc8"
-    readonly property color emptyColor: "#6c7086"
-    readonly property color buttonBg: "#313244"
-    readonly property color buttonBorder: "#45475a"
-    readonly property color danger: "#f38ba8"
-    readonly property color approve: "#a6e3a1"
-    readonly property color accent: "#89b4fa"
+    // ── Palette: OmarchyTheme.qml (~/.local/state/omarchy/current/
+    //    theme/colors.toml, live-reloaded on `omarchy theme set`),
+    //    falling back to Catppuccin Mocha -- nova's original popup
+    //    palette -- when no Omarchy theme is readable. Only the
+    //    colors.toml has a real per-theme equivalent for are pulled
+    //    from it; labelColor/emptyColor/buttonBg/buttonBorder are
+    //    derived shades of the theme's own background/foreground so
+    //    they track the active theme's brightness without needing a
+    //    dedicated TOML key for each.
+    readonly property color bgColor: OmarchyTheme.background
+    readonly property color textColor: OmarchyTheme.foreground
+    readonly property color labelColor: Qt.lighter(OmarchyTheme.background, 2.2)
+    readonly property color emptyColor: Qt.lighter(OmarchyTheme.background, 1.8)
+    readonly property color buttonBg: Qt.lighter(OmarchyTheme.background, 1.4)
+    readonly property color buttonBorder: Qt.lighter(OmarchyTheme.background, 1.8)
+    readonly property color danger: OmarchyTheme.red
+    readonly property color approve: OmarchyTheme.green
+    readonly property color accent: OmarchyTheme.accent
 
     readonly property color phaseColor: {
         switch (popupState.phase) {
-        case "recording": return "#f38ba8";
-        case "transcribing": return "#89b4fa";
-        case "classifying": return "#cba6f7";
-        case "confirming": return "#fab387";
-        case "ready": return "#a6e3a1";
-        default: return "#45475a";
+        case "recording": return OmarchyTheme.red;
+        case "transcribing": return OmarchyTheme.accent;
+        case "classifying": return OmarchyTheme.magenta;
+        case "confirming": return OmarchyTheme.yellow;
+        case "ready": return OmarchyTheme.green;
+        default: return buttonBorder;
         }
     }
 

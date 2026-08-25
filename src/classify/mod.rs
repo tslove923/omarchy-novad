@@ -30,10 +30,12 @@ pub enum Intent {
     MediaControl,
     MemoryReturn,
     Coding,
-    /// Anything the local model shouldn't handle itself — nova forwarded
-    /// this to an external provider (OpenClaw). novad's equivalent is
-    /// OmaPilot, when it's the active trigger; see the roadmap's
-    /// standalone-vs-OmaPilot decision.
+    /// Anything the local model shouldn't handle itself — reasoning,
+    /// open-ended questions, writing, general knowledge. Handed off to
+    /// OpenClaw via `router::handoff_to_openclaw` (see openclaw.rs),
+    /// same as `Coding`; the two intents exist separately only because
+    /// nova's original taxonomy did and the classifier still uses both
+    /// labels, but they're routed identically.
     External,
 }
 
@@ -94,12 +96,38 @@ pub enum ClassifyError {
     UnknownIntent(String),
 }
 
+// Bare label names with no description left HOME_ASSISTANT acting as
+// an accidental catch-all for anything conversational/open-ended
+// ("write a haiku about kubernetes", "what is the meaning of life",
+// "explain kubernetes pods" all misclassified as HOME_ASSISTANT in
+// testing, none of which mention a smart-home device) -- the model
+// had nothing to disambiguate it from CODING/EXTERNAL.
+//
+// First fix attempt used full-sentence descriptions per intent on
+// separate lines; that overcorrected on this 1.7B model -- it started
+// echoing back words from the *description* as the ARGUMENT (e.g.
+// "turn on the living room lights" -> argument "control a smart-home
+// device -- lights, locks...") and even invented a label not in the
+// enum ("EXPLANATION"). Short parenthetical examples inline, one
+// line, keeps the original's terse shape while still disambiguating,
+// and the ARGUMENT line now says explicitly to pull from the
+// utterance, not this prompt.
 const SYSTEM_PROMPT: &str = "\
-Classify the user utterance into exactly one intent: OPEN_APP, WEB_SEARCH, \
-OPEN_WEBSITE, SYSTEM_CONTROL, TERMINAL, HOME_ASSISTANT, MEDIA_CONTROL, \
-MEMORY_RETURN, CODING, EXTERNAL. Respond with ONLY two lines, no other text:\n\
+Classify the user utterance into exactly one intent: \
+OPEN_APP (launch an app, e.g. \"open firefox\"), \
+WEB_SEARCH (search the web), \
+OPEN_WEBSITE (open a known site, e.g. \"go to youtube\"), \
+SYSTEM_CONTROL (volume/brightness), \
+TERMINAL (run a shell command), \
+HOME_ASSISTANT (control a smart-home device: lights, locks, thermostat), \
+MEDIA_CONTROL (music/video playback), \
+MEMORY_RETURN (recall something said earlier), \
+CODING (write/explain/debug code), \
+EXTERNAL (anything else: open-ended questions, explanations, general \
+knowledge -- the default when nothing else fits). \
+Respond with ONLY two lines, no other text:\n\
 INTENT: <name>\n\
-ARGUMENT: <extracted argument text>";
+ARGUMENT: <the relevant words copied verbatim from the user's utterance>";
 
 /// Generation budget for a classification call. Thinking-mode models
 /// (Qwen3's default chat template) emit a `<think>...</think>` block

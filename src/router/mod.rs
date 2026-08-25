@@ -4,15 +4,15 @@
 //! a simple, config-free local handler (app launch, web search/open,
 //! system volume/brightness, MPRIS media control) plus TERMINAL, which
 //! needs a confirm round-trip through the popup before running
-//! anything. Intents nova routed through per-user config or an
-//! external LLM (HOME_ASSISTANT, MEMORY_RETURN, CODING, EXTERNAL) fall
-//! through to [`RouteResult::Unhandled`] here — there's no
-//! `novad serve`-hosted router smart enough to safely improvise a
-//! shell command or HA call yet, and guessing wrong there is worse
-//! than admitting "not yet."
+//! anything, and EXTERNAL/CODING, which hand off to a real reasoning
+//! agent via `openclaw` (see openclaw.rs). HOME_ASSISTANT and
+//! MEMORY_RETURN still fall through to [`RouteResult::Unhandled`] --
+//! no local handler for those yet, and guessing wrong there (a smart-
+//! home action, a memory lookup) is worse than admitting "not yet."
 
 mod app_launcher;
 mod media_control;
+mod openclaw;
 mod system_control;
 mod terminal;
 mod web;
@@ -32,6 +32,16 @@ pub enum RouteResult {
     /// back to something else — e.g. treat the utterance as plain
     /// dictation instead of a command.
     Unhandled,
+}
+
+/// Whether `intent` is routed via a (potentially slow, seconds-to-a-
+/// minute) external handoff rather than a fast local action --
+/// `pipeline.rs` checks this before calling [`route`] so it can show
+/// `PopupPhase::HandingOff` for the duration of the call, which
+/// [`route`] itself can't signal since it's synchronous and already
+/// finished by the time it returns.
+pub fn is_external_handoff(intent: Intent) -> bool {
+    matches!(intent, Intent::External | Intent::Coding)
 }
 
 /// Route (and, unless it needs confirmation, execute) one classified
@@ -99,10 +109,24 @@ pub fn route(intent: Intent, argument: &str) -> RouteResult {
                 }
             }
         }
+        // External/Coding don't go through here -- pipeline.rs checks
+        // is_external_handoff() before calling route() and calls
+        // openclaw::handoff() directly against the full transcript
+        // instead of this intent's (often keyword-stripped) argument.
+        // A coding/reasoning request needs the whole utterance for
+        // context, not an extracted phrase -- see openclaw.rs's docs.
         Intent::HomeAssistant | Intent::MemoryReturn | Intent::Coding | Intent::External => {
             RouteResult::Unhandled
         }
     }
+}
+
+/// Hands `utterance` off to OpenClaw. Called directly by pipeline.rs
+/// for `Intent::External`/`Intent::Coding` against the full transcript
+/// (bypassing [`route`] and its argument-only signature) -- see
+/// `is_external_handoff` and openclaw.rs's module docs for why.
+pub fn handoff_to_openclaw(utterance: &str) -> (bool, String) {
+    openclaw::handoff(utterance)
 }
 
 /// Execute a [`RouteResult::NeedsConfirmation`] command after the user

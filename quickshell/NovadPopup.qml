@@ -81,6 +81,7 @@ PanelWindow {
         case "recording": return OmarchyTheme.red;
         case "transcribing": return OmarchyTheme.accent;
         case "classifying": return OmarchyTheme.magenta;
+        case "handing_off": return OmarchyTheme.accent;
         case "confirming": return OmarchyTheme.yellow;
         case "ready": return OmarchyTheme.green;
         default: return buttonBorder;
@@ -91,11 +92,15 @@ PanelWindow {
     // modes 1:1 — every phase but "idle" gets the ring; "listening" gets
     // no dedicated animation of its own (nova's CSS didn't define one
     // either) so it falls through to the ring's steady low-opacity look.
+    // "handing_off" reuses the "transcribing" mode (strobing) rather than
+    // getting its own AnimatedBorder mode — same "working, no ETA" look
+    // fits an OpenClaw round-trip just as well as a local transcribe.
     readonly property string borderMode: {
         switch (popupState.phase) {
         case "recording": return "recording";
         case "transcribing": return "transcribing";
         case "classifying": return "classifying";
+        case "handing_off": return "transcribing";
         case "confirming": return "confirming";
         case "ready": return "ready";
         default: return popupState.phase; // "idle" or "listening"
@@ -108,6 +113,7 @@ PanelWindow {
         case "recording": return "Recording…";
         case "transcribing": return "Transcribing…";
         case "classifying": return "Thinking…";
+        case "handing_off": return "Asking OpenClaw…";
         case "confirming": return "Confirm";
         case "ready": return "Ready";
         default: return "";
@@ -177,7 +183,7 @@ PanelWindow {
                     anchors.verticalCenter: parent.verticalCenter
 
                     SequentialAnimation on opacity {
-                        running: ["recording", "transcribing", "classifying", "confirming"].includes(popupState.phase)
+                        running: ["recording", "transcribing", "classifying", "handing_off", "confirming"].includes(popupState.phase)
                         loops: Animation.Infinite
                         NumberAnimation { to: 0.5; duration: 600 }
                         NumberAnimation { to: 1.0; duration: 600 }

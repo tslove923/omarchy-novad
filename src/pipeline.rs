@@ -118,6 +118,22 @@ pub fn run_session(cfg: &PipelineConfig) {
         result.latency.as_secs_f32()
     );
 
+    if router::is_external_handoff(result.intent) {
+        // Full transcript, not result.argument -- see
+        // router::handoff_to_openclaw's docs for why a
+        // coding/reasoning handoff needs the whole utterance rather
+        // than the classifier's (often keyword-stripped) extraction.
+        popup::write_state(&PopupState {
+            phase: PopupPhase::HandingOff,
+            text: transcript.clone(),
+            confirm_label: None,
+        });
+        let (success, message) = router::handoff_to_openclaw(&transcript);
+        tracing::info!("[pipeline] handed off to openclaw: success={success} message={message:?}");
+        show_ready_and_wait(&message);
+        return;
+    }
+
     match router::route(result.intent, &result.argument) {
         RouteResult::Done { success, message } => {
             tracing::info!("[pipeline] routed: success={success} message={message:?}");

@@ -28,7 +28,11 @@ use std::sync::mpsc;
 use serde::Serialize;
 
 /// Mirrors nova's popup.js state machine (`idle`, `listening`,
-/// `recording`, `transcribing`, `classifying`, `confirming`, `ready`).
+/// `recording`, `transcribing`, `classifying`, `confirming`, `ready`),
+/// plus `handing_off` -- novad-specific, no nova equivalent (nova's
+/// OpenClaw handoff reused its "processing"/strobing state; novad
+/// gives it a distinct phase since it runs meaningfully longer than
+/// local classification and deserves its own status label).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PopupPhase {
@@ -37,6 +41,7 @@ pub enum PopupPhase {
     Recording,
     Transcribing,
     Classifying,
+    HandingOff,
     Confirming,
     Ready,
 }

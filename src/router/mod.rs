@@ -60,6 +60,19 @@ pub fn route(intent: Intent, argument: &str) -> RouteResult {
             }
         }
         Intent::SystemControl => {
+            // Recovery: the classifier occasionally mislabels a media
+            // transport command ("pause", "stop <player>") as
+            // SYSTEM_CONTROL -- see media_control::looks_like_media_command
+            // for the observed live cases and why. Catch it before
+            // system_control::run, which would otherwise fail the
+            // whole thing with "Unknown system control: ...".
+            if media_control::looks_like_media_command(argument) {
+                let (ok, msg) = media_control::run(argument);
+                return RouteResult::Done {
+                    success: ok,
+                    message: msg,
+                };
+            }
             let (ok, msg) = system_control::run(argument);
             RouteResult::Done {
                 success: ok,

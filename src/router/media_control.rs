@@ -210,3 +210,65 @@ pub fn run(argument: &str) -> (bool, String) {
     tracing::debug!("[router:media] argument={argument:?} -> action={action}");
     mpris_control(action)
 }
+
+/// Whether `text` reads as a media-transport command ("pause", "stop
+/// spotify", "next track") rather than a volume/brightness one.
+/// Recovery check for `router::route`'s `SystemControl` arm: the
+/// classifier sometimes mislabels these as `SYSTEM_CONTROL` (observed
+/// live: "PAUSE" and "Stop, plexamp." both came back as
+/// `SYSTEM_CONTROL` with no volume/brightness word for
+/// `system_control::parse_action` to recognize) since both intents can
+/// start with an imperative verb and neither the transcript nor the
+/// classifier's short-utterance context always disambiguates "stop"
+/// (a player) from "stop" (unrelated). Mirrors nova's own
+/// `looks_like_media_command` EXTERNAL-recovery check in router.py,
+/// applied to a different intent pair here since novad's classifier
+/// taxonomy doesn't route SYSTEM_CONTROL through EXTERNAL first.
+pub fn looks_like_media_command(text: &str) -> bool {
+    let lower = text.to_lowercase();
+    // A volume/brightness word takes precedence -- "pause" alone is
+    // ambiguous, but "pause the volume" isn't a real phrase anyone
+    // says, so this ordering doesn't cost real SYSTEM_CONTROL cases.
+    let has_sys_word = [
+        "volume",
+        "sound",
+        "brightness",
+        "bright",
+        "screen",
+        "display",
+    ]
+    .iter()
+    .any(|w| lower.contains(w));
+    if has_sys_word {
+        return false;
+    }
+    [
+        "pause", "resume", "unpause", "stop", "next", "previous", "prev", "skip", "play",
+    ]
+    .iter()
+    .any(|w| lower.contains(w))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn recognizes_live_misclassified_cases() {
+        // Both observed live, misclassified as SYSTEM_CONTROL.
+        assert!(looks_like_media_command("PAUSE"));
+        assert!(looks_like_media_command("Stop, plexamp."));
+    }
+
+    #[test]
+    fn volume_word_takes_precedence() {
+        assert!(!looks_like_media_command("volume up"));
+        assert!(!looks_like_media_command("stop the screen from dimming"));
+    }
+
+    #[test]
+    fn plain_system_control_unaffected() {
+        assert!(!looks_like_media_command("brightness down"));
+        assert!(!looks_like_media_command("mute"));
+    }
+}

@@ -63,6 +63,12 @@ pub fn run_session(cfg: &PipelineConfig) {
         return;
     }
 
+    if !wait_for_recording_to_start(cfg) {
+        tracing::warn!("[pipeline] voxtype never left idle after record start -- giving up");
+        popup::write_state(&PopupState::default());
+        return;
+    }
+
     if !wait_for_idle(cfg) {
         tracing::warn!("[pipeline] session timed out waiting for voxtype to return to idle");
         popup::write_state(&PopupState::default());
@@ -159,9 +165,35 @@ fn start_recording(cfg: &PipelineConfig) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Polls voxtype's state file until it reads "idle" (recording and
-/// any transcription finished) or `SESSION_TIMEOUT` elapses. Returns
-/// false on timeout.
+/// Waits for voxtype's state file to read something other than
+/// "idle" -- confirms the daemon actually processed the `record
+/// start` signal and began recording, rather than racing ahead on the
+/// stale "idle" the file still holds from *before* this session
+/// started. Without this, `wait_for_idle` below could observe that
+/// same pre-existing "idle" on its very first poll and return
+/// immediately, as if the (not-yet-started) session had already
+/// finished -- exactly what happened in the first live test: the
+/// pipeline read a nonexistent transcript file a few milliseconds
+/// after telling voxtype to start.
+fn wait_for_recording_to_start(cfg: &PipelineConfig) -> bool {
+    let start = Instant::now();
+    loop {
+        if start.elapsed() >= SESSION_TIMEOUT {
+            return false;
+        }
+        match std::fs::read_to_string(&cfg.voxtype_state_path) {
+            Ok(s) if s.trim() != "idle" => return true,
+            _ => std::thread::sleep(POLL_INTERVAL),
+        }
+    }
+}
+
+/// Polls voxtype's state file until it reads "idle" again (recording
+/// and any transcription finished) or `SESSION_TIMEOUT` elapses.
+/// Returns false on timeout. Only meaningful after
+/// `wait_for_recording_to_start` has confirmed the session is
+/// actually underway -- see that function's docs for why calling this
+/// alone right after `record start` is a race.
 fn wait_for_idle(cfg: &PipelineConfig) -> bool {
     let start = Instant::now();
     loop {

@@ -11,11 +11,9 @@
 // through Quickshell.Io.Process, same mechanism as MeetingControls.qml.
 //
 // The animated conic-gradient border from nova's CSS (rotate while
-// recording, strobe while transcribing, flash on ready) is intentionally
-// simplified here to a color + pulse animation rather than a true
-// rotating conic gradient — safer bet without live-testing exotic Shape
-// gradients against this system's actual Quickshell/Qt version. Revisit
-// once this is confirmed working end to end.
+// recording, strobe while transcribing, flash on ready) is ported for
+// real via AnimatedBorder.qml (Qt5Compat.GraphicalEffects — confirmed
+// present on this system's Quickshell/Qt build), not simplified.
 
 import QtQuick
 import Quickshell
@@ -46,10 +44,12 @@ PanelWindow {
 
     // Restrict the actually-interactive input region to the card itself
     // — without this, the full-screen anchor above (needed to position
-    // the card via anchors.horizontalCenter/bottom below) makes the
+    // the card via anchors.horizontalCenter/top below) makes the
     // ENTIRE screen swallow clicks while the popup is visible, not just
     // the small area actually drawn. Everything outside `card`'s bounds
-    // must stay click-through to whatever's underneath.
+    // must stay click-through to whatever's underneath. (The border's
+    // glow paints outside this region too, same as nova's CSS box-shadow
+    // did — a glow was never meant to be clickable.)
     mask: Region {
         x: card.x
         y: card.y
@@ -80,6 +80,21 @@ PanelWindow {
         }
     }
 
+    // Maps PopupPhase (see popup/mod.rs) onto AnimatedBorder's animation
+    // modes 1:1 — every phase but "idle" gets the ring; "listening" gets
+    // no dedicated animation of its own (nova's CSS didn't define one
+    // either) so it falls through to the ring's steady low-opacity look.
+    readonly property string borderMode: {
+        switch (popupState.phase) {
+        case "recording": return "recording";
+        case "transcribing": return "transcribing";
+        case "classifying": return "classifying";
+        case "confirming": return "confirming";
+        case "ready": return "ready";
+        default: return popupState.phase; // "idle" or "listening"
+        }
+    }
+
     readonly property string phaseLabel: {
         switch (popupState.phase) {
         case "listening": return "Listening…";
@@ -104,34 +119,37 @@ PanelWindow {
         running: false
     }
 
+    // Sits directly behind `card`, centered on it — see
+    // AnimatedBorder.qml's header for why this reproduces nova's CSS
+    // z-index-0-ring-behind-a-z-index-1-card composition instead of
+    // painting a border on the card's own edge.
+    AnimatedBorder {
+        anchors.centerIn: card
+        holeWidth: card.width
+        holeHeight: card.height
+        holeRadius: card.radius
+        mode: root.borderMode
+    }
+
     Rectangle {
         id: card
         width: 420
         implicitHeight: contentColumn.implicitHeight + 24
         height: implicitHeight
         anchors.horizontalCenter: parent.horizontalCenter
-        anchors.bottom: parent.bottom
-        anchors.bottomMargin: 48
+        // Matches nova's Electron popup exactly (main.js createPopupWindow:
+        // y = screenH * 0.3, centered horizontally) rather than the bottom
+        // anchor the first QML pass used. Also keeps novad's popup clear of
+        // voxtype's own OSD, which sits low (bottom-center, top_margin=0.85
+        // in voxtype's config.toml) — novad on top, voxtype below.
+        anchors.top: parent.top
+        anchors.topMargin: Math.round(root.height * 0.3)
 
         radius: 10
         color: root.bgColor
-        border.width: 2
-        border.color: root.phaseColor
 
-        Behavior on border.color {
-            ColorAnimation { duration: 250 }
-        }
         Behavior on implicitHeight {
             NumberAnimation { duration: 150; easing.type: Easing.OutQuad }
-        }
-
-        // Pulse the border while something is actively happening —
-        // stands in for nova's rotating/strobing conic gradient.
-        SequentialAnimation on opacity {
-            running: ["recording", "transcribing", "classifying"].includes(popupState.phase)
-            loops: Animation.Infinite
-            NumberAnimation { to: 0.55; duration: 550; easing.type: Easing.InOutQuad }
-            NumberAnimation { to: 1.0; duration: 550; easing.type: Easing.InOutQuad }
         }
 
         Column {

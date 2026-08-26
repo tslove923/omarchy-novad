@@ -15,6 +15,7 @@ mod app_launcher;
 mod bluebubbles;
 pub mod home_assistant;
 mod media_control;
+mod omapilot;
 mod openclaw;
 mod system_control;
 mod telegram;
@@ -22,7 +23,9 @@ mod terminal;
 mod web;
 
 use crate::classify::Intent;
-use crate::config::{BlueBubblesConfig, HomeAssistantConfig, TelegramConfig};
+use crate::config::{BlueBubblesConfig, HomeAssistantConfig, OmaPilotConfig, TelegramConfig};
+
+pub use omapilot::{ask as ask_omapilot, strip_direct_target_prefix};
 
 /// Which confirmed handler to call once the user approves a
 /// `RouteResult::NeedsConfirmation` in the popup — see [`run_confirmed`].
@@ -219,12 +222,33 @@ pub fn route(
     }
 }
 
-/// Hands `utterance` off to OpenClaw. Called directly by pipeline.rs
-/// for `Intent::External`/`Intent::Coding` against the full transcript
-/// (bypassing [`route`] and its argument-only signature) -- see
-/// `is_external_handoff` and openclaw.rs's module docs for why.
-pub fn handoff_to_openclaw(utterance: &str) -> (bool, String) {
-    openclaw::handoff(utterance)
+/// Hands `utterance` off to an external assistant -- called directly
+/// by pipeline.rs for `Intent::External`/`Intent::Coding` against the
+/// full transcript (bypassing [`route`] and its argument-only
+/// signature) -- see `is_external_handoff` and openclaw.rs's module
+/// docs for why.
+///
+/// OpenClaw is tried first whenever it's reachable (a real
+/// synchronous reply for the popup to show), regardless of whether
+/// OmaPilot is configured. OmaPilot (see omapilot.rs) is tried only
+/// as a fallback -- when `[omapilot] fallback = true` and OpenClaw's
+/// attempt failed (not installed, gateway down, timed out) -- since
+/// its `askText` handoff can only report success/failure, never the
+/// actual answer.
+pub fn handoff_external(utterance: &str, omapilot: Option<&OmaPilotConfig>) -> (bool, String) {
+    let (ok, message) = openclaw::handoff(utterance);
+    if ok {
+        return (ok, message);
+    }
+    match omapilot {
+        Some(cfg) if cfg.fallback => {
+            tracing::info!(
+                "[router] OpenClaw handoff failed ({message:?}), falling back to OmaPilot"
+            );
+            omapilot::ask(utterance, cfg)
+        }
+        _ => (ok, message),
+    }
 }
 
 /// Recovery check: does `text` (meant to be the full transcript, not

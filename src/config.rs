@@ -35,6 +35,8 @@ pub struct Config {
     #[allow(dead_code)] // not read until router::spotify lands -- see SpotifyConfig's own TODO
     #[serde(default)]
     pub spotify: Option<SpotifyConfig>,
+    #[serde(default)]
+    pub omapilot: Option<OmaPilotConfig>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -190,6 +192,62 @@ pub struct SpotifyConfig {
     /// Unix timestamp (seconds) the access token expires at.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expires_at: Option<u64>,
+}
+
+/// OmaPilot voice-assistant integration -- see `router::omapilot`. No
+/// `#[derive(Default)]`: unlike `HomeAssistantConfig`/`BlueBubblesConfig`
+/// there's no missing-credential reason to require this section, but a
+/// silently-defaulted "on" would start feeding transcripts into a
+/// third-party plugin (possibly a tool-capable, auto-approving agent --
+/// see `router::omapilot`'s module docs) without the user ever having
+/// opted in. `Option<OmaPilotConfig>` on `Config`, same shape as the
+/// other integrations, means it does nothing at all until configured.
+#[derive(Debug, Clone, Deserialize)]
+pub struct OmaPilotConfig {
+    /// Try OmaPilot when `Intent::External`/`Coding` need a handoff and
+    /// OpenClaw is unavailable (not installed, gateway down, timed
+    /// out) or unconfigured. OpenClaw is always tried first when it's
+    /// on `PATH` -- it returns a real synchronous reply for the popup
+    /// to show; OmaPilot's `askText` (see `router::omapilot`) doesn't,
+    /// it only reports whether the handoff itself succeeded.
+    #[serde(default)]
+    pub fallback: bool,
+    /// Recognize `direct_target_prefix` at the start of any wake-word
+    /// utterance and route straight to OmaPilot via `askText`, bypassing
+    /// classification (and `fallback`'s OpenClaw-first ordering)
+    /// entirely -- e.g. "hey jarvis, pilot: what's the capital of
+    /// France" with the default prefix.
+    #[serde(default)]
+    pub direct_target: bool,
+    /// Case-insensitive; a trailing `:` or `,` (with surrounding
+    /// whitespace) is stripped along with the prefix itself. Only
+    /// checked when `direct_target` is true.
+    #[serde(default = "default_direct_target_prefix")]
+    pub direct_target_prefix: String,
+    /// Quickshell plugin target id `omarchy-shell` dispatches
+    /// `askText` to. Override only if OmaPilot is ever installed under
+    /// a different id.
+    #[serde(default = "default_omapilot_plugin_id")]
+    pub plugin_id: String,
+}
+
+impl Default for OmaPilotConfig {
+    fn default() -> Self {
+        Self {
+            fallback: false,
+            direct_target: false,
+            direct_target_prefix: default_direct_target_prefix(),
+            plugin_id: default_omapilot_plugin_id(),
+        }
+    }
+}
+
+fn default_direct_target_prefix() -> String {
+    "pilot".to_string()
+}
+
+fn default_omapilot_plugin_id() -> String {
+    "io.github.spencerbull.omapilot".to_string()
 }
 
 /// `~/.config/omarchy-novad/config.toml`.

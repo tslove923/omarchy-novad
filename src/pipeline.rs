@@ -16,7 +16,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use crate::classify::{Classifier, Intent};
-use crate::config::{BlueBubblesConfig, HomeAssistantConfig, TelegramConfig};
+use crate::config::{BlueBubblesConfig, HomeAssistantConfig, OmaPilotConfig, TelegramConfig};
 use crate::popup::{self, PopupAction, PopupPhase, PopupState};
 use crate::router::{self, RouteResult};
 
@@ -55,6 +55,11 @@ pub struct PipelineConfig {
     /// falls back to `RouteResult::Unhandled` in that case, same shape
     /// as `bluebubbles` above.
     pub telegram: Option<TelegramConfig>,
+    /// `None` (or present with both `fallback`/`direct_target` false)
+    /// disables OmaPilot entirely: `direct_target`'s prefix is never
+    /// checked, and `Intent::External`/`Coding`'s handoff only ever
+    /// tries OpenClaw. See `router::omapilot`.
+    pub omapilot: Option<OmaPilotConfig>,
 }
 
 /// Run one full session after a wake-word detection: start voxtype
@@ -108,6 +113,28 @@ pub fn run_session(cfg: &PipelineConfig) {
         return;
     }
 
+    // Direct target: "hey jarvis, pilot: ..." bypasses classification
+    // (and `route`) entirely -- checked before anything else touches
+    // `transcript`, same principle as `is_external_handoff` bypassing
+    // `route`'s argument-only signature: the full remainder after the
+    // prefix goes to OmaPilot verbatim, not through the classifier's
+    // keyword extraction.
+    if let Some(cfg) = cfg.omapilot.as_ref().filter(|c| c.direct_target) {
+        if let Some(remainder) = router::strip_direct_target_prefix(&transcript, cfg) {
+            popup::write_state(&PopupState {
+                phase: PopupPhase::HandingOff,
+                text: remainder.to_string(),
+                confirm_label: None,
+            });
+            let (success, message) = router::ask_omapilot(remainder, cfg);
+            tracing::info!(
+                "[pipeline] direct-target handoff to omapilot: success={success} message={message:?}"
+            );
+            show_ready_and_wait(&message);
+            return;
+        }
+    }
+
     popup::write_state(&PopupState {
         phase: PopupPhase::Classifying,
         text: transcript.clone(),
@@ -145,8 +172,8 @@ pub fn run_session(cfg: &PipelineConfig) {
             confirm_label: None,
             editable: false,
         });
-        let (success, message) = router::handoff_to_openclaw(&transcript);
-        tracing::info!("[pipeline] handed off to openclaw: success={success} message={message:?}");
+        let (success, message) = router::handoff_external(&transcript, cfg.omapilot.as_ref());
+        tracing::info!("[pipeline] external handoff: success={success} message={message:?}");
         show_ready_and_wait(&message);
         return;
     }

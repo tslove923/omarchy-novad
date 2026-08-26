@@ -165,11 +165,18 @@ server_url = "https://your-bluebubbles-server"
 password = "..."
 [bluebubbles.contacts]
 # mom = "iMessage;-;+15551234567"
+
+[omapilot]
+# fallback = false
+# direct_target = false
+# direct_target_prefix = "pilot"
+# plugin_id = "io.github.spencerbull.omapilot"
 ```
 
-See [Home Assistant setup](#home-assistant-setup) and
-[BlueBubbles setup](#bluebubbles-setup) below for what each section
-actually needs.
+See [Home Assistant setup](#home-assistant-setup),
+[BlueBubbles setup](#bluebubbles-setup), and
+[OmaPilot integration](#omapilot-integration) below for what each
+section actually needs.
 
 ## Home Assistant setup
 
@@ -344,6 +351,60 @@ openclaw-handoff "reply with the single word PING and nothing else" "smoke-test"
 Then say the wake word and something open-ended ("what's the capital
 of France", "write a python script to sort a list") — the popup
 should show "Asking OpenClaw…" and come back with a real answer.
+
+## OmaPilot integration
+
+Two independent, optional roles OmaPilot can fill, both off by default
+— set either or both under `[omapilot]` (see [Configuration](#configuration)):
+
+- **`fallback = true`** — when `EXTERNAL`/`CODING` need a handoff (see
+  [OpenClaw setup](#openclaw-setup)) and OpenClaw is unavailable (not
+  installed, gateway down, timed out) or unconfigured, try OmaPilot
+  next instead of giving up.
+- **`direct_target = true`** — recognize `direct_target_prefix`
+  (default `"pilot"`) at the start of any wake-word utterance and
+  route straight to OmaPilot, bypassing classification entirely. "hey
+  jarvis, pilot: what's the capital of France" hands OmaPilot exactly
+  "what's the capital of France", not the classifier's (often
+  keyword-stripped) extraction.
+
+Both go through the same mechanism (`router::omapilot::ask`, via
+`omarchy-shell <plugin_id> askText <text>`), which behaves nothing
+like OpenClaw's handoff: OpenClaw's CLI bridge is a real request/reply
+round-trip and returns the agent's answer as text for the popup to
+show. OmaPilot's `askText` is fire-and-forget — it opens OmaPilot's
+own panel and starts it answering there, and the answer streams into
+OmaPilot's UI directly, never back through omarchy-novad. So the popup
+can only show "Handed off to OmaPilot", never the actual answer.
+
+**`askText` is not part of OmaPilot's upstream API.** It's a local
+patch on top of the plugin's own git clone
+(`~/.config/omarchy/plugins/io.github.spencerbull.omapilot`, branch
+`patch/omapilot-asktext-ipc`, not merged into that clone's `main` and
+not upstreamed to `spencerbull/omarchy-omapilot`). Without the patch
+applied and checked out, every `askText` call fails with "Function not
+found" and both `fallback` and `direct_target` degrade to "OmaPilot
+isn't available right now" — `fallback` still works via OpenClaw
+alone, `direct_target` just never fires. See that commit's message in
+the plugin's own repo for what the patch adds and why.
+
+**Before enabling either flag**, know that OmaPilot's configured
+provider can be a real tool-capable agent (its "pi" harness), and if
+OmaPilot's own `configuredDangerousAutoApprove` setting is on,
+`askText` hands it a transcript that gets acted on without a human
+confirming each tool call. omarchy-novad has no visibility into that
+setting and can't override it from here — check OmaPilot's own
+settings before turning either of these on if that matters to you.
+
+### Verify
+
+```bash
+omarchy-shell io.github.spencerbull.omapilot askText "In one sentence, what's the capital of France?"
+# should print "ok" and OmaPilot's panel should open and start answering
+```
+
+If it prints `Function not found`, the `askText` patch isn't applied
+in the running plugin checkout — see above.
 
 ## Known classifier gaps
 

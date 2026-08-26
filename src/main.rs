@@ -219,6 +219,7 @@ fn main() -> anyhow::Result<()> {
                 file_config.home_assistant,
                 file_config.bluebubbles,
                 file_config.telegram,
+                file_config.omapilot,
             )
         }
         Command::Serve {
@@ -496,6 +497,7 @@ fn run_detect(
     home_assistant: Option<config::HomeAssistantConfig>,
     bluebubbles: Option<config::BlueBubblesConfig>,
     telegram: Option<config::TelegramConfig>,
+    omapilot: Option<config::OmaPilotConfig>,
 ) -> anyhow::Result<()> {
     let trigger = resolve_trigger(on_detect);
     let detector = Detector::new(wakeword, device, &cache_dir(), threshold, patience)?;
@@ -540,6 +542,7 @@ fn run_detect(
         home_assistant,
         bluebubbles,
         telegram,
+        omapilot,
     };
 
     let chunk_samples = listener.chunk_samples();

@@ -71,6 +71,18 @@ pub struct ServeConfig {
     pub device: String,
     pub model_id: String,
     pub port: u16,
+    /// `false` (default): every `/v1/chat/completions` response has its
+    /// `<think>...</think>` reasoning block suppressed (`/no_think`
+    /// appended to the current turn, plus a defensive strip -- see
+    /// `serve::run_generation_core`) before it reaches the client.
+    /// `true`: the block is kept, but reformatted as collapsible
+    /// markdown (`<details><summary>...`) instead of left as raw
+    /// `<think>` tags inline with the answer -- some people want to
+    /// see the reasoning, but not have it clutter the visible answer
+    /// by default. Whether a given client's markdown renderer actually
+    /// renders `<details>` as click-to-expand (vs. plain HTML-ish
+    /// text) isn't controlled by this server.
+    pub show_thinking: bool,
 }
 
 impl Default for ServeConfig {
@@ -79,6 +91,7 @@ impl Default for ServeConfig {
             device: "GPU".to_string(),
             model_id: "novad-local".to_string(),
             port: 8420,
+            show_thinking: false,
         }
     }
 }

@@ -164,7 +164,14 @@ const MAX_TOKENS: usize = 256;
 /// suspenders with `strip_thinking`: some quantized/converted variants
 /// don't honor it reliably, so the parser also strips any `<think>`
 /// block that slips through instead of relying on this alone.
-const NO_THINK_SUFFIX: &str = "\n/no_think";
+///
+/// `pub(crate)` (along with `strip_thinking` below) so `serve::mod`
+/// can apply the same suppression to every `/v1/chat/completions`
+/// request it serves, not just this module's own classification
+/// calls — found live: a real client (OmaPilot's "pi" harness, via
+/// `askText`) hitting the server directly got a raw `<think>...</think>`
+/// block shown as if it were the answer.
+pub(crate) const NO_THINK_SUFFIX: &str = "\n/no_think";
 
 pub struct Classifier {
     base_url: String,
@@ -230,10 +237,12 @@ impl Classifier {
 /// the directive alone. Only strips a block anchored at the very start
 /// (after whitespace) — content that merely mentions "<think>" further
 /// in isn't touched.
-fn strip_thinking(content: &str) -> &str {
+pub(crate) fn strip_thinking(content: &str) -> &str {
     let trimmed = content.trim_start();
     match trimmed.strip_prefix("<think>") {
-        Some(rest) => rest.split_once("</think>").map_or(rest, |(_, after)| after),
+        Some(rest) => rest
+            .split_once("</think>")
+            .map_or(rest, |(_, after)| after.trim_start()),
         None => trimmed,
     }
 }

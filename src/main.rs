@@ -86,6 +86,11 @@ enum Command {
         model_id: String,
         #[arg(long, default_value_t = 8420)]
         port: u16,
+        /// Keep the model's `<think>...</think>` reasoning instead of
+        /// suppressing it, reformatted as collapsible markdown rather
+        /// than left inline with the answer.
+        #[arg(long)]
+        show_thinking: bool,
     },
 
     /// One-time setup tasks.
@@ -227,17 +232,24 @@ fn main() -> anyhow::Result<()> {
             device,
             model_id,
             port,
+            show_thinking,
         } => {
             let s = &file_config.serve;
             let device = config::resolve_str(device, "GPU", &s.device);
             let model_id = config::resolve_str(model_id, "novad-local", &s.model_id);
             let port = if port != 8420 { port } else { s.port };
+            // Bool flags have no "unset" sentinel like port's 8420
+            // trick above -- either source turning it on is enough
+            // (the flag can force it on for one run; the config file
+            // controls the persistent default).
+            let show_thinking = show_thinking || s.show_thinking;
             let config = serve::ServeConfig {
                 model_path: model,
                 device,
                 cache_dir: serve_cache_dir(),
                 model_id,
                 port,
+                show_thinking,
             };
             tokio::runtime::Runtime::new()?.block_on(serve::run(config))
         }

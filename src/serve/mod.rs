@@ -40,6 +40,7 @@
 use std::convert::Infallible;
 use std::sync::Mutex;
 
+use crate::classify::{strip_thinking, NO_THINK_SUFFIX};
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::sse::{Event, KeepAlive, Sse};
@@ -67,11 +68,14 @@ pub struct ServeConfig {
     pub cache_dir: std::path::PathBuf,
     pub model_id: String,
     pub port: u16,
+    /// See `crate::config::ServeConfig::show_thinking`'s doc comment.
+    pub show_thinking: bool,
 }
 
 struct AppState {
     pipeline: Mutex<LlmPipeline>,
     model_id: String,
+    show_thinking: bool,
 }
 
 pub async fn run(config: ServeConfig) -> anyhow::Result<()> {
@@ -97,6 +101,7 @@ pub async fn run(config: ServeConfig) -> anyhow::Result<()> {
     let state = std::sync::Arc::new(AppState {
         pipeline: Mutex::new(pipeline),
         model_id: config.model_id.clone(),
+        show_thinking: config.show_thinking,
     });
 
     let app = Router::new()
@@ -496,11 +501,37 @@ struct GenerationResult {
     completion_tokens: usize,
 }
 
+/// `show_thinking = false`: strips a leading `<think>...</think>`
+/// block entirely (`strip_thinking`). `true`: keeps it, but
+/// reformatted as collapsible markdown instead of left as raw tags
+/// inline with the answer -- see `ServeConfig::show_thinking`'s doc
+/// comment.
+fn format_thinking(content: &str, show_thinking: bool) -> String {
+    if !show_thinking {
+        return strip_thinking(content).to_string();
+    }
+    let trimmed = content.trim_start();
+    let Some(rest) = trimmed.strip_prefix("<think>") else {
+        return trimmed.to_string();
+    };
+    let Some((thought, after)) = rest.split_once("</think>") else {
+        // Unterminated block (truncated generation, or no closing tag
+        // at all) -- nothing sensible to fold, pass through as-is
+        // rather than guessing where the answer starts.
+        return trimmed.to_string();
+    };
+    format!(
+        "<details>\n<summary>💭 Thinking</summary>\n\n{}\n\n</details>\n\n{}",
+        thought.trim(),
+        after.trim_start()
+    )
+}
+
 fn run_generation_core(
     state: &AppState,
     req: &ChatCompletionRequest,
 ) -> Result<GenerationResult, ServeError> {
-    let (history, gen_config) = build_history_and_config(req)?;
+    let (history, gen_config) = build_history_and_config(req, state.show_thinking)?;
 
     let mut pipeline = state
         .pipeline
@@ -512,6 +543,9 @@ fn run_generation_core(
     let text = results
         .get_string()
         .map_err(|e| ServeError::Infer(format!("get_string: {e}")))?;
+    // Belt-and-suspenders with the NO_THINK_SUFFIX directive above --
+    // some quantized/converted variants don't honor it reliably.
+    let text = format_thinking(&text, state.show_thinking);
     let (prompt_tokens, completion_tokens) = results
         .get_perf_metrics()
         .and_then(|m| Ok((m.get_num_input_tokens()?, m.get_num_generation_tokens()?)))
@@ -607,15 +641,32 @@ fn parse_one_tool_call(block: &str, index: usize) -> Option<ToolCallOut> {
 /// `GenerationConfig` pair ready to hand to `generate_with_history`.
 fn build_history_and_config(
     req: &ChatCompletionRequest,
+    show_thinking: bool,
 ) -> Result<(ChatHistory, GenerationConfig), ServeError> {
     let mut history =
         ChatHistory::new().map_err(|e| ServeError::Infer(format!("ChatHistory::new: {e}")))?;
-    for m in &req.messages {
-        let text = m
+    // Qwen3 thinking-mode suppression (see NO_THINK_SUFFIX's doc
+    // comment) -- found live: a real client (OmaPilot's "pi" harness)
+    // hitting this endpoint directly got a raw <think>...</think>
+    // block shown as if it were the answer. Only the *current* turn's
+    // user message gets the directive, not every past user turn in
+    // history -- it's a per-turn switch, appending it to old messages
+    // would be a no-op at best and confusing replay content at worst.
+    // Skipped entirely when `show_thinking` is on -- appending it
+    // unconditionally was a real bug found live: it suppressed
+    // reasoning at generation time regardless of the config, so
+    // `format_thinking`'s collapsible-markdown path had nothing to
+    // show (an empty `<details>` block).
+    let last_user_idx = req.messages.iter().rposition(|m| m.role == "user");
+    for (i, m) in req.messages.iter().enumerate() {
+        let mut text = m
             .content
             .as_ref()
             .map(MessageContent::to_text)
             .unwrap_or_default();
+        if !show_thinking && m.role == "user" && Some(i) == last_user_idx {
+            text.push_str(NO_THINK_SUFFIX);
+        }
         let msg = match m.role.as_str() {
             "system" => ChatMessage::system(text),
             "assistant" => match &m.tool_calls {
@@ -741,6 +792,38 @@ fn now_unix_ms() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod thinking_tests {
+    use super::*;
+
+    const RAW: &str = "<think>\nOkay, the user wants...\n</think>\n\nParis.";
+
+    #[test]
+    fn strips_when_show_thinking_is_off() {
+        assert_eq!(format_thinking(RAW, false), "Paris.");
+    }
+
+    #[test]
+    fn folds_into_collapsible_markdown_when_show_thinking_is_on() {
+        assert_eq!(
+            format_thinking(RAW, true),
+            "<details>\n<summary>💭 Thinking</summary>\n\nOkay, the user wants...\n\n</details>\n\nParis."
+        );
+    }
+
+    #[test]
+    fn no_think_block_passes_through_unchanged_either_way() {
+        assert_eq!(format_thinking("Paris.", false), "Paris.");
+        assert_eq!(format_thinking("Paris.", true), "Paris.");
+    }
+
+    #[test]
+    fn unterminated_block_passes_through_when_shown() {
+        let truncated = "<think>\nstill reasoning, got cut off";
+        assert_eq!(format_thinking(truncated, true), truncated);
+    }
 }
 
 #[cfg(test)]

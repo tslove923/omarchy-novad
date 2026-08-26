@@ -154,6 +154,7 @@ within it, behaves exactly like before this file existed.
 # device = "GPU"
 # model_id = "novad-local"
 # port = 8420
+# show_thinking = false
 
 [home_assistant]
 url = "https://ha.example.com"
@@ -353,6 +354,13 @@ of France", "write a python script to sort a list") — the popup
 should show "Asking OpenClaw…" and come back with a real answer.
 
 ## OmaPilot integration
+
+If OmaPilot points at `omarchy-novad serve` as a provider (its "pi"
+harness included), see [`[serve] show_thinking`](#configuration) —
+`omarchy-novad serve` suppresses the model's `<think>...</think>`
+reasoning by default so it doesn't show up inline as if it were the
+answer; set `show_thinking = true` (or pass `--show-thinking`) to keep
+it, folded into a collapsible `<details>` block instead of raw tags.
 
 Two independent, optional roles OmaPilot can fill, both off by default
 — set either or both under `[omapilot]` (see [Configuration](#configuration)):

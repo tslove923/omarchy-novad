@@ -281,6 +281,18 @@ fn parse_response(
             intent_str = Some(rest.trim().to_string());
         } else if let Some(rest) = line.strip_prefix("ARGUMENT:") {
             argument = strip_wrapping_quotes(rest.trim()).to_string();
+        } else if intent_str.is_none() && Intent::parse(line).is_some() {
+            // Recovery: the model occasionally drops the "INTENT:"
+            // label entirely and just replies with the bare name on
+            // its own line -- found live: qwen3-1.7b-instruct answered
+            // "MESSAGE  \nARGUMENT: text Jessica Love why are you so
+            // upset" (no "INTENT:" prefix at all), failing what would
+            // otherwise be a perfectly good classification. Only fires
+            // before a real INTENT: line has been seen, so it can't
+            // clobber a well-formed response over a coincidental later
+            // line (an ARGUMENT value happening to equal a bare intent
+            // name, however unlikely).
+            intent_str = Some(line.to_string());
         }
     }
 
@@ -360,6 +372,34 @@ mod tests {
         .unwrap();
         assert_eq!(result.intent, Intent::WebSearch);
         assert_eq!(result.argument, "best pizza near me");
+    }
+
+    #[test]
+    fn recovers_bare_intent_name_missing_the_intent_label() {
+        // Exact live failure: qwen3-1.7b-instruct answered "MESSAGE  "
+        // (two trailing spaces, no "INTENT:" prefix at all) on its own
+        // line, which the strict parser rejected as UnexpectedFormat
+        // even though the classification itself was correct.
+        let result = parse_response(
+            "MESSAGE  \nARGUMENT: text Jessica Love why are you so upset",
+            std::time::Duration::from_millis(1),
+        )
+        .unwrap();
+        assert_eq!(result.intent, Intent::Message);
+        assert_eq!(result.argument, "text Jessica Love why are you so upset");
+    }
+
+    #[test]
+    fn bare_intent_recovery_never_overrides_a_real_intent_line() {
+        // A real INTENT: line always wins, even if some other line
+        // elsewhere also happens to look like a bare intent name.
+        let result = parse_response(
+            "INTENT: OPEN_APP\nARGUMENT: firefox\nMESSAGE",
+            std::time::Duration::from_millis(1),
+        )
+        .unwrap();
+        assert_eq!(result.intent, Intent::OpenApp);
+        assert_eq!(result.argument, "firefox");
     }
 
     #[test]

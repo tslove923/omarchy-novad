@@ -1,0 +1,30 @@
+#!/bin/bash
+
+# Undoes what ./setup did. Run it yourself: ~/.config/omarchy/plugins/<id>/remove
+
+set -e
+
+UNIT_DIR="$HOME/.config/systemd/user"
+UNITS=(omarchy-novad-serve.service omarchy-novad-detect.service omarchy-novad-tts.service)
+
+info() { echo -e "\e[32m$*\e[0m"; }
+
+info "Removing omarchy-novad's background services (serve, detect, tts).\n"
+
+for unit in "${UNITS[@]}"; do
+  if systemctl --user is-enabled "$unit" &>/dev/null || systemctl --user is-active "$unit" &>/dev/null; then
+    echo "Stopping and disabling $unit..."
+    systemctl --user disable --now "$unit" 2>/dev/null || true
+  fi
+  if [[ -f "$UNIT_DIR/$unit" ]]; then
+    rm -f "$UNIT_DIR/$unit"
+  fi
+done
+
+systemctl --user daemon-reload
+
+info "\nDone. The omarchy-novad binary, its models, and ~/.config/omarchy-novad/config.toml
+were left in place in case you reinstall this plugin later."
+echo
+echo "You'll probably also want to remove the plugin itself:"
+echo "  omarchy plugin remove io.github.tslove923.omarchy-novad"

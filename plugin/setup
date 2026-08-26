@@ -1,0 +1,159 @@
+#!/bin/bash
+
+# omarchy plugin add only clones files, so this is the rest of the install.
+# Run it yourself after cloning: ~/.config/omarchy/plugins/<id>/setup
+#
+# Installs systemd --user units for the omarchy-novad daemon's three
+# long-running processes (serve, detect, and optionally the TTS
+# server) and enables+starts them. This plugin only supplies the
+# Quickshell UI (Service.qml/BarWidget.qml/Overlay.qml) -- the actual
+# `omarchy-novad` binary, its wake/LLM models, and its config.toml are
+# built/fetched/edited exactly as the main project's README describes;
+# this script wires that already-built daemon into systemd rather than
+# building it for you.
+#
+# Safe to rerun: every step below is idempotent (unit files are
+# rewritten with freshly detected paths, `systemctl enable --now` is a
+# no-op on an already-enabled+running unit).
+
+set -e
+
+root=$(cd "$(dirname "$0")" && pwd)
+UNIT_DIR="$HOME/.config/systemd/user"
+
+info() { echo -e "\e[32m$*\e[0m"; }
+warn() { echo -e "\e[33m$*\e[0m"; }
+fail() { echo -e "\e[31m$*\e[0m" >&2; exit 1; }
+
+info "Setting up omarchy-novad's background services (serve, detect, tts).\n"
+
+# ── 1. Locate the omarchy-novad binary ──────────────────────────────
+#
+# This plugin does not build the daemon itself -- see the main
+# project's README "Setup" section for `cargo build --release`.
+# Override with OMARCHY_NOVAD_BIN if it isn't on this shell's PATH
+# (e.g. `~/Work/omarchy-novad/bin/omarchy-novad`, the symlink that
+# README has you create).
+NOVAD_BIN="${OMARCHY_NOVAD_BIN:-}"
+if [[ -z $NOVAD_BIN ]]; then
+  NOVAD_BIN=$(command -v omarchy-novad || true)
+fi
+if [[ -z $NOVAD_BIN || ! -x $NOVAD_BIN ]]; then
+  fail "Can't find the omarchy-novad binary. Build it first (cargo build --release
+in your omarchy-novad checkout, see that project's README), then either put it on
+PATH or rerun with:
+  OMARCHY_NOVAD_BIN=/path/to/omarchy-novad $root/setup"
+fi
+info "Found omarchy-novad binary: $NOVAD_BIN"
+
+# ── 2. Locate an OpenVINO GenAI SDK runtime for `serve` ─────────────
+#
+# `omarchy-novad serve` dlopens OpenVINO's shared libraries at startup
+# (runtime-linking, see the main README's Requirements section) rather
+# than linking them at build time, so the unit needs LD_LIBRARY_PATH
+# pointed at one specific SDK version's runtime/lib/intel64. Multiple
+# versions can coexist side by side (e.g. a newer one installed only
+# for --kind vlm); prefer a non-"dev" (stable) release build unless
+# OMARCHY_NOVAD_OV_SDK_VERSION pins one explicitly.
+SDK_ROOT="$HOME/.local/share/openvino-genai-sdk"
+if [[ -n ${OMARCHY_NOVAD_OV_SDK_VERSION:-} ]]; then
+  OV_LIB_DIR="$SDK_ROOT/$OMARCHY_NOVAD_OV_SDK_VERSION/runtime/lib/intel64"
+  [[ -d $OV_LIB_DIR ]] || fail "OMARCHY_NOVAD_OV_SDK_VERSION=$OMARCHY_NOVAD_OV_SDK_VERSION but $OV_LIB_DIR doesn't exist."
+else
+  OV_LIB_DIR=""
+  # Stable versions first (sorted ascending by -V, so the last match is
+  # the newest stable release), then fall back to anything at all
+  # (e.g. a "2026.4.0.0.devYYYYMMDD" prerelease) if no stable build is
+  # installed.
+  while IFS= read -r candidate; do
+    [[ -d $candidate/runtime/lib/intel64 ]] && OV_LIB_DIR="$candidate/runtime/lib/intel64"
+  done < <(find "$SDK_ROOT" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | grep -v '\.dev' | sort -V)
+  if [[ -z $OV_LIB_DIR ]]; then
+    while IFS= read -r candidate; do
+      [[ -d $candidate/runtime/lib/intel64 ]] && OV_LIB_DIR="$candidate/runtime/lib/intel64"
+    done < <(find "$SDK_ROOT" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sort -V)
+  fi
+fi
+if [[ -z $OV_LIB_DIR ]]; then
+  fail "No OpenVINO GenAI SDK found under $SDK_ROOT. Install it first -- see
+the main omarchy-novad README's Requirements section -- then rerun this script."
+fi
+info "Using OpenVINO GenAI runtime: $OV_LIB_DIR"
+
+# ── 3. Locate the classifier model for `serve` ──────────────────────
+#
+# Override with OMARCHY_NOVAD_MODEL_DIR to point at a different
+# OpenVINO IR chat model directory (any works; the default matches the
+# main README's tuned recommendation).
+MODEL_DIR="${OMARCHY_NOVAD_MODEL_DIR:-$HOME/.local/share/omarchy-novad/llm-models/qwen3-1.7b-instruct}"
+MODEL_ID="${OMARCHY_NOVAD_MODEL_ID:-qwen3-1.7b-instruct}"
+SERVE_DEVICE="${OMARCHY_NOVAD_SERVE_DEVICE:-GPU}"
+SERVE_PORT="${OMARCHY_NOVAD_SERVE_PORT:-8420}"
+if [[ ! -d $MODEL_DIR ]]; then
+  fail "Classifier model not found at $MODEL_DIR. Fetch it first -- see the main
+omarchy-novad README's Setup section (\`snapshot_download(repo_id='OpenVINO/Qwen3-1.7B-int4-ov', ...)\`) --
+or point OMARCHY_NOVAD_MODEL_DIR at a model you already have, then rerun this script."
+fi
+info "Using classifier model: $MODEL_DIR (model-id: $MODEL_ID)"
+
+# ── 4. Write and install serve + detect units ───────────────────────
+mkdir -p "$UNIT_DIR"
+
+render_unit() {
+  local template=$1 dest=$2
+  sed \
+    -e "s#@NOVAD_BIN@#$NOVAD_BIN#g" \
+    -e "s#@LD_LIBRARY_PATH@#$OV_LIB_DIR#g" \
+    -e "s#@MODEL_PATH@#$MODEL_DIR#g" \
+    -e "s#@MODEL_ID@#$MODEL_ID#g" \
+    -e "s#@SERVE_DEVICE@#$SERVE_DEVICE#g" \
+    -e "s#@SERVE_PORT@#$SERVE_PORT#g" \
+    "$template" > "$dest"
+}
+
+render_unit "$root/systemd/omarchy-novad-serve.service" "$UNIT_DIR/omarchy-novad-serve.service"
+render_unit "$root/systemd/omarchy-novad-detect.service" "$UNIT_DIR/omarchy-novad-detect.service"
+info "Installed omarchy-novad-serve.service and omarchy-novad-detect.service to $UNIT_DIR"
+
+systemctl --user daemon-reload
+systemctl --user enable --now omarchy-novad-serve.service omarchy-novad-detect.service
+info "Enabled and started omarchy-novad-serve.service and omarchy-novad-detect.service."
+
+# ── 5. TTS server (optional -- only needed for `converse start`) ────
+#
+# This plugin doesn't vendor tts-prototype/'s Python project or model
+# files, so this step only fires if it can find a real omarchy-novad
+# source checkout with the model files already in place (see
+# tts-prototype/README.md for how to fetch them). Point
+# OMARCHY_NOVAD_REPO_DIR at your checkout if it isn't at the guessed
+# default.
+REPO_DIR="${OMARCHY_NOVAD_REPO_DIR:-$HOME/Work/omarchy-novad}"
+TTS_DIR="$REPO_DIR/tts-prototype"
+UV_BIN=$(command -v uv || true)
+
+if [[ -z $UV_BIN ]]; then
+  warn "\nSkipping the TTS server: 'uv' isn't on PATH (needed to run tts-prototype/server.py).
+Install uv, then rerun this script, or install it by hand later -- see the plugin README."
+elif [[ ! -f $TTS_DIR/server.py || ! -f $TTS_DIR/kokoro-v1.0.onnx || ! -f $TTS_DIR/voices-v1.0.bin ]]; then
+  warn "\nSkipping the TTS server: didn't find tts-prototype/server.py + model files under
+$TTS_DIR. This is only needed for \`omarchy-novad converse start\`'s voice loop --
+see tts-prototype/README.md in your omarchy-novad checkout for the one-time model
+download, or point OMARCHY_NOVAD_REPO_DIR at your checkout, then rerun this script."
+else
+  sed \
+    -e "s#@TTS_DIR@#$TTS_DIR#g" \
+    -e "s#@UV_BIN@#$UV_BIN#g" \
+    "$root/systemd/omarchy-novad-tts.service" > "$UNIT_DIR/omarchy-novad-tts.service"
+  systemctl --user daemon-reload
+  systemctl --user enable --now omarchy-novad-tts.service
+  info "Installed, enabled, and started omarchy-novad-tts.service (using $TTS_DIR)."
+fi
+
+info "\nDone. Check status with:
+  systemctl --user status omarchy-novad-serve omarchy-novad-detect
+  journalctl --user -u omarchy-novad-detect -f
+
+Say the wake word (\"hey jarvis\" by default) to try it. Edit
+~/.config/omarchy-novad/config.toml for Home Assistant/BlueBubbles/Telegram/
+OpenClaw credentials and any defaults you want to change -- see this plugin's
+README and the main project's README for what each section needs."

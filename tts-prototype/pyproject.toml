@@ -1,0 +1,23 @@
+[project]
+name = "tts-prototype"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "tslove923", email = "lovetr923@gmail.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.141.1",
+    "kokoro-onnx>=0.6.1",
+    "onnxruntime>=1.29.0",
+    "soundfile>=0.14.0",
+    "uvicorn>=0.52.4",
+]
+
+[project.scripts]
+tts-prototype = "tts_prototype:main"
+
+[build-system]
+requires = ["uv_build>=0.12.5,<0.13.0"]
+build-backend = "uv_build"

@@ -179,14 +179,19 @@ api_hash = "..."
 
 [openclaw]
 # approve_device_command = "ssh admin-host \"kubectl exec -n openclaw deploy/openclaw -- openclaw devices approve --latest\""
+
+[tts]
+# serve_url = "http://127.0.0.1:8421"
+# voice = "af_nova"
 ```
 
 See [Home Assistant setup](#home-assistant-setup),
 [BlueBubbles setup](#bluebubbles-setup),
 [Telegram setup](#telegram-setup),
-[OmaPilot integration](#omapilot-integration), and
-[OpenClaw setup](#openclaw-setup) below for what each section
-actually needs.
+[OmaPilot integration](#omapilot-integration),
+[OpenClaw setup](#openclaw-setup), and
+[OpenClaw voice conversation](#openclaw-voice-conversation-converse)
+below for what each section actually needs.
 
 ## Home Assistant setup
 
@@ -441,6 +446,75 @@ approve_device_command = "ssh admin-host \"kubectl exec -n openclaw deploy/openc
 `openclaw devices approve <id>` command to actually approve it — if
 your gateway needs the two-step dance rather than one-shot approval,
 write that into `approve_device_command` instead.
+
+## OpenClaw voice conversation (`converse`)
+
+`omarchy-novad converse start` is a third way to talk to OpenClaw,
+alongside the automatic wake-word handoff and `continue-in-herdr`
+above: a genuine spoken back-and-forth. It listens (reusing the same
+voxtype record/transcribe round-trip the wake-word pipeline uses),
+hands the utterance to OpenClaw (`router::handoff_external`, same
+`agent:main:novad:voice` session the automatic handoff uses — so
+context carries over exactly like it already does there), shows
+OpenClaw's *full* reply in a dedicated Quickshell window
+(`quickshell/OpenClawConversation.qml`), speaks a shorter conversational
+summary of it out loud, then listens again — looping until you say a
+stop phrase ("stop conversation", "end conversation", "goodbye
+jarvis") or run `omarchy-novad converse stop` from another terminal.
+
+```bash
+omarchy-novad converse start
+# ... talk back and forth ...
+omarchy-novad converse stop   # or Ctrl+C the running process
+```
+
+Point `detect --on-detect` (or `[detect] on_detect` in config.toml) at
+`omarchy-novad converse start` to trigger it hands-free from the wake
+word instead of typing it.
+
+### How the spoken summary is derived
+
+OpenClaw's replies are often long/technical — not what you want read
+aloud verbatim. Each reply is condensed to 1-3 short spoken sentences
+via a second call to the same local LLM `omarchy-novad serve` already
+runs for classification (`[tts] `'s config doesn't need its own model —
+`--classify-base-url`/`--classify-model-id` on `converse start` point
+at the existing serve instance, same defaults as `detect`). If that
+summarization call fails for any reason, the full reply is spoken
+verbatim instead — a slower fallback, never silence.
+
+### TTS backend (Kokoro, CPU)
+
+Speech synthesis is [Kokoro](https://github.com/hexgrad/kokoro) (an
+82M-parameter model) run via `onnxruntime`'s CPU execution provider, in
+a small standalone Python server — see `tts-prototype/README.md` for
+how to install and run it (`tts-prototype/server.py`, one-time `uv`
+setup, then a long-running process just like `omarchy-novad serve`;
+`converse` only ever talks to it over HTTP, same relationship
+`classify` has to the LLM serve instance). GPU/NPU acceleration was
+investigated and abandoned for this model: OpenVINO's GPU plugin fails
+to compile Kokoro's ONNX graph outright (a dynamic-rank limitation in
+its harmonic-source vocoder component — confirmed a systemic
+architecture incompatibility, not a fixable one-off bug), and no
+working Intel NPU path exists anywhere in the Kokoro ecosystem today.
+CPU alone measures ~0.3x real-time, which can't synthesize a whole
+10-20s reply in under a second — but `converse` never needs to: it
+synthesizes and speaks sentence-by-sentence, so the *first* sentence
+(the only one perceived latency depends on) is ready in well under a
+second, with every later sentence's synthesis overlapping the previous
+one's playback (validated in `tts-prototype/stream_demo.py`: ~0.7s to
+first audio, zero gaps for the rest of a 17s response).
+
+```toml
+[tts]
+# serve_url = "http://127.0.0.1:8421"
+# voice = "af_nova"
+```
+
+`voice` is any id from Kokoro's v1.0 voice pack (see
+`tts-prototype/README.md` for the full list — English options include
+`af_nova`, `af_bella`, `af_sky`, `am_adam`, `am_michael`, `bf_emma`,
+and more).
 
 ## OmaPilot integration
 

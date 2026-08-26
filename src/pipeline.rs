@@ -77,31 +77,14 @@ pub fn run_session(cfg: &PipelineConfig) {
         editable: false,
     });
 
-    if let Err(e) = start_recording(cfg) {
-        tracing::error!("[pipeline] failed to start recording: {e}");
-        popup::write_state(&PopupState::default());
-        return;
-    }
-
-    if !wait_for_recording_to_start(cfg) {
-        tracing::warn!("[pipeline] voxtype never left idle after record start -- giving up");
-        popup::write_state(&PopupState::default());
-        return;
-    }
-
-    if !wait_for_idle(cfg) {
-        tracing::warn!("[pipeline] session timed out waiting for voxtype to return to idle");
-        popup::write_state(&PopupState::default());
-        return;
-    }
-
-    let transcript = match std::fs::read_to_string(&cfg.transcript_path) {
-        Ok(s) => s.trim().to_string(),
+    let transcript = match listen_and_transcribe(
+        &cfg.voxtype_binary,
+        &cfg.transcript_path,
+        &cfg.voxtype_state_path,
+    ) {
+        Ok(t) => t,
         Err(e) => {
-            tracing::error!(
-                "[pipeline] failed to read transcript at {:?}: {e}",
-                cfg.transcript_path
-            );
+            tracing::error!("[pipeline] {e}");
             popup::write_state(&PopupState::default());
             return;
         }
@@ -281,14 +264,44 @@ pub fn run_session(cfg: &PipelineConfig) {
     }
 }
 
-fn start_recording(cfg: &PipelineConfig) -> std::io::Result<()> {
+/// Runs one voxtype record+transcribe round-trip and returns the
+/// resulting transcript, trimmed (empty means nothing was said --
+/// callers decide whether that's "try again" or "give up," same as
+/// `run_session` treating it as "nothing to do"). Factored out of
+/// `run_session` so a caller that needs more than one turn (see
+/// `crate::converse`'s multi-turn loop) can call this again for each
+/// follow-up reply without going through classify/route at all.
+pub fn listen_and_transcribe(
+    voxtype_binary: &str,
+    transcript_path: &std::path::Path,
+    voxtype_state_path: &std::path::Path,
+) -> anyhow::Result<String> {
+    start_recording(voxtype_binary, transcript_path)
+        .map_err(|e| anyhow::anyhow!("failed to start recording: {e}"))?;
+
+    if !wait_for_recording_to_start(voxtype_state_path) {
+        anyhow::bail!("voxtype never left idle after record start -- giving up");
+    }
+    if !wait_for_idle(voxtype_state_path) {
+        anyhow::bail!("session timed out waiting for voxtype to return to idle");
+    }
+
+    let transcript = std::fs::read_to_string(transcript_path)
+        .map_err(|e| anyhow::anyhow!("failed to read transcript at {transcript_path:?}: {e}"))?;
+    Ok(transcript.trim().to_string())
+}
+
+fn start_recording(
+    voxtype_binary: &str,
+    transcript_path: &std::path::Path,
+) -> std::io::Result<()> {
     // Best-effort: stale content from a previous session shouldn't be
     // mistaken for this one's transcript if voxtype fails to write a
     // fresh one for some reason.
-    let _ = std::fs::remove_file(&cfg.transcript_path);
+    let _ = std::fs::remove_file(transcript_path);
 
-    let file_arg = format!("--file={}", cfg.transcript_path.display());
-    let status = std::process::Command::new(&cfg.voxtype_binary)
+    let file_arg = format!("--file={}", transcript_path.display());
+    let status = std::process::Command::new(voxtype_binary)
         .args(["record", "start", &file_arg])
         .status()?;
     if !status.success() {
@@ -309,13 +322,13 @@ fn start_recording(cfg: &PipelineConfig) -> std::io::Result<()> {
 /// finished -- exactly what happened in the first live test: the
 /// pipeline read a nonexistent transcript file a few milliseconds
 /// after telling voxtype to start.
-fn wait_for_recording_to_start(cfg: &PipelineConfig) -> bool {
+fn wait_for_recording_to_start(voxtype_state_path: &std::path::Path) -> bool {
     let start = Instant::now();
     loop {
         if start.elapsed() >= SESSION_TIMEOUT {
             return false;
         }
-        match std::fs::read_to_string(&cfg.voxtype_state_path) {
+        match std::fs::read_to_string(voxtype_state_path) {
             Ok(s) if s.trim() != "idle" => return true,
             _ => std::thread::sleep(POLL_INTERVAL),
         }
@@ -328,13 +341,13 @@ fn wait_for_recording_to_start(cfg: &PipelineConfig) -> bool {
 /// `wait_for_recording_to_start` has confirmed the session is
 /// actually underway -- see that function's docs for why calling this
 /// alone right after `record start` is a race.
-fn wait_for_idle(cfg: &PipelineConfig) -> bool {
+fn wait_for_idle(voxtype_state_path: &std::path::Path) -> bool {
     let start = Instant::now();
     loop {
         if start.elapsed() >= SESSION_TIMEOUT {
             return false;
         }
-        match std::fs::read_to_string(&cfg.voxtype_state_path) {
+        match std::fs::read_to_string(voxtype_state_path) {
             Ok(s) if s.trim() == "idle" => return true,
             _ => std::thread::sleep(POLL_INTERVAL),
         }

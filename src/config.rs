@@ -39,6 +39,8 @@ pub struct Config {
     pub omapilot: Option<OmaPilotConfig>,
     #[serde(default)]
     pub openclaw: Option<OpenClawConfig>,
+    #[serde(default)]
+    pub tts: TtsConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -292,6 +294,34 @@ pub struct OpenClawConfig {
     /// launch.
     #[serde(default)]
     pub approve_device_command: Option<String>,
+}
+
+/// A locally-run Kokoro TTS HTTP server (see tts-server/) -- see
+/// `crate::tts`'s module docs for why this is a sidecar process novad
+/// only ever talks to over HTTP, same relationship `[serve]`'s
+/// `classify_base_url` has to the LLM serve instance. Not
+/// `Option<...>`: like `ServeConfig`, there's a sensible default
+/// (a server on the loopback interface, default port), and it only
+/// ever does anything when `omarchy-novad converse` is actually run --
+/// an unconfigured, unused section shouldn't need an explicit opt-in
+/// the way a third-party credential (BlueBubbles, Telegram) does.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct TtsConfig {
+    /// Base URL of the running TTS server.
+    pub serve_url: String,
+    /// Kokoro voice id -- see tts-server/README.md for the full list
+    /// bundled in `voices-v1.0.bin`.
+    pub voice: String,
+}
+
+impl Default for TtsConfig {
+    fn default() -> Self {
+        Self {
+            serve_url: "http://127.0.0.1:8421".to_string(),
+            voice: "af_nova".to_string(),
+        }
+    }
 }
 
 /// `~/.config/omarchy-novad/config.toml`.

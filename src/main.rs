@@ -170,6 +170,7 @@ fn main() -> anyhow::Result<()> {
                 ),
                 config::resolve_opt(on_detect, d.on_detect.clone()),
                 file_config.home_assistant,
+                file_config.bluebubbles,
             )
         }
         Command::Serve {
@@ -337,6 +338,7 @@ fn run_detect(
     classify_model_id: &str,
     on_detect: Option<String>,
     home_assistant: Option<config::HomeAssistantConfig>,
+    bluebubbles: Option<config::BlueBubblesConfig>,
 ) -> anyhow::Result<()> {
     let trigger = resolve_trigger(on_detect);
     let detector = Detector::new(wakeword, device, &cache_dir(), threshold, patience)?;
@@ -379,6 +381,7 @@ fn run_detect(
         transcript_path: transcript_path(),
         voxtype_state_path: voxtype_state_path(),
         home_assistant,
+        bluebubbles,
     };
 
     let chunk_samples = listener.chunk_samples();

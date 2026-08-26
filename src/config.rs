@@ -28,6 +28,8 @@ pub struct Config {
     pub serve: ServeConfig,
     #[serde(default)]
     pub home_assistant: Option<HomeAssistantConfig>,
+    #[serde(default)]
+    pub bluebubbles: Option<BlueBubblesConfig>,
     #[allow(dead_code)] // not read until router::spotify lands -- see SpotifyConfig's own TODO
     #[serde(default)]
     pub spotify: Option<SpotifyConfig>,
@@ -97,6 +99,33 @@ pub struct HomeAssistantConfig {
     /// no restriction -- every entity HA reports is controllable.
     #[serde(default)]
     pub allowed_entities: Vec<String>,
+}
+
+/// BlueBubbles REST API credentials -- see `router::bluebubbles`. Ported
+/// from the `~/.agents/skills/bluebubbles` OmaPilot skill (send-only,
+/// verified working against a real server) rather than starting fresh.
+/// No `#[derive(Default)]`, same reasoning as `HomeAssistantConfig`:
+/// there's no sensible default `server_url`/`password`, so this section
+/// is `Option<BlueBubblesConfig>` -- present only when configured.
+#[derive(Debug, Clone, Deserialize)]
+pub struct BlueBubblesConfig {
+    /// e.g. "http://192.168.1.50:1234" -- the Mac running BlueBubbles
+    /// Server, from that app's own settings.
+    pub server_url: String,
+    /// Server password, also from the BlueBubbles Server app's settings.
+    /// Kept out of CLI flags/argv for the same reason as HA's token --
+    /// see `HomeAssistantConfig::token`.
+    pub password: String,
+    /// Manual spoken-name -> chat GUID overrides, checked before the
+    /// dynamic lookup in `router::bluebubbles` (which resolves a name
+    /// against the Mac's real Contacts app via `GET /api/v1/contact` and
+    /// finds or creates a thread automatically -- see that module's
+    /// docs). Only needed for an alias ("mom" for someone Contacts has
+    /// under a different name) or someone not in Contacts at all. Find a
+    /// chat's GUID in the BlueBubbles Server app's chat list / logs, or
+    /// from an incoming-message webhook payload's `data.chats[0].guid`.
+    #[serde(default)]
+    pub contacts: std::collections::HashMap<String, String>,
 }
 
 /// Spotify OAuth (PKCE) config + stored tokens -- see

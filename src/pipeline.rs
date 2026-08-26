@@ -16,7 +16,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use crate::classify::Classifier;
-use crate::config::HomeAssistantConfig;
+use crate::config::{BlueBubblesConfig, HomeAssistantConfig};
 use crate::popup::{self, PopupAction, PopupPhase, PopupState};
 use crate::router::{self, RouteResult};
 
@@ -47,6 +47,10 @@ pub struct PipelineConfig {
     /// `RouteResult::Unhandled` in that case, same as before this
     /// intent had a handler at all.
     pub home_assistant: Option<HomeAssistantConfig>,
+    /// `None` when `[bluebubbles]` isn't configured -- `Intent::Message`
+    /// falls back to `RouteResult::Unhandled` in that case, same shape
+    /// as `home_assistant` above.
+    pub bluebubbles: Option<BlueBubblesConfig>,
 }
 
 /// Run one full session after a wake-word detection: start voxtype
@@ -140,12 +144,17 @@ pub fn run_session(cfg: &PipelineConfig) {
         return;
     }
 
-    match router::route(result.intent, &result.argument, cfg.home_assistant.as_ref()) {
+    match router::route(
+        result.intent,
+        &result.argument,
+        cfg.home_assistant.as_ref(),
+        cfg.bluebubbles.as_ref(),
+    ) {
         RouteResult::Done { success, message } => {
             tracing::info!("[pipeline] routed: success={success} message={message:?}");
             show_ready_and_wait(&message);
         }
-        RouteResult::NeedsConfirmation { preview } => {
+        RouteResult::NeedsConfirmation { preview, kind } => {
             popup::write_state(&PopupState {
                 phase: PopupPhase::Confirming,
                 text: preview.clone(),
@@ -153,7 +162,8 @@ pub fn run_session(cfg: &PipelineConfig) {
             });
             match wait_for_action() {
                 Some(PopupAction::Approve) => {
-                    let (_ok, message) = router::run_confirmed_terminal(&result.argument);
+                    let (_ok, message) =
+                        router::run_confirmed(kind, &result.argument, cfg.bluebubbles.as_ref());
                     show_ready_and_wait(&message);
                 }
                 _ => popup::write_state(&PopupState::default()),

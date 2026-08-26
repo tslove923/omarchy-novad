@@ -17,9 +17,10 @@ Working end to end on real hardware (Intel NPU + iGPU): wake-word
 detection, dictation via [voxtype](https://github.com/peteonrails/voxtype)
 (a personal fork — see [Requirements](#requirements)), local intent
 classification, a scoped command router (app launch, web search/open,
-volume/brightness, MPRIS media control, sandboxed terminal commands),
-and OpenClaw handoff for anything else. Not yet a real Omarchy shell
-plugin — see [Roadmap](#roadmap).
+volume/brightness, MPRIS media control, Home Assistant, BlueBubbles
+messaging, sandboxed terminal commands), and OpenClaw handoff for
+anything else. Not yet a real Omarchy shell plugin — see
+[Roadmap](#roadmap).
 
 ## Architecture
 
@@ -28,7 +29,9 @@ plugin — see [Roadmap](#roadmap).
 | `omarchy-novad detect` | Listens for a wake word via a 3-stage openWakeWord ONNX pipeline on the NPU, then runs the pipeline below on each detection |
 | `src/pipeline.rs` | One session per detection: start voxtype recording → wait for it to auto-stop and transcribe → classify → route → drive the popup |
 | `src/classify/` | Intent classification against an OpenAI-compatible endpoint (`omarchy-novad serve`, see below) |
-| `src/router/` | Local handlers for the intents that don't need real reasoning: `app_launcher`, `web`, `system_control`, `media_control`, `terminal` (sandboxed, confirm-gated), `openclaw` (external handoff) |
+| `src/router/` | Local handlers for the intents that don't need real reasoning: `app_launcher`, `web`, `system_control`, `media_control`, `home_assistant` (see [Home Assistant setup](#home-assistant-setup)), `bluebubbles` (see [BlueBubbles setup](#bluebubbles-setup)), `terminal` (sandboxed, confirm-gated), `openclaw` (external handoff) |
+| `src/config.rs` | Persistent config file (`~/.config/omarchy-novad/config.toml`) — see [Configuration](#configuration) |
+| `src/popup/` | Popup state machine + Unix-socket control channel; also where the confirm/approve round-trip lives (`PopupPhase::Confirming`, `PopupAction::Approve`/`Deny`) for anything that shouldn't execute straight from a voice command — see [Confirmation flow](#confirmation-flow) |
 | `omarchy-novad serve` | Hosts a local OpenVINO GenAI model behind an OpenAI-compatible `/v1/chat/completions` API — this is what `classify` talks to |
 | `quickshell/` | The popup UI (Quickshell/QML), themed live from `~/.local/state/omarchy/current/theme/colors.toml` |
 
@@ -51,13 +54,18 @@ Two triggers are supported for what a detected wake word does
   build time). This project was built against the OpenVINO GenAI SDK
   install at `~/.local/share/openvino-genai-sdk/`.
 - **[voxtype](https://github.com/peteonrails/voxtype)**, built with
-  `--features openvino`, on `PATH` as `voxtype`. This project
-  currently targets a personal fork
-  ([tslove923/voxtype](https://github.com/tslove923/voxtype),
-  `feature/streaming-openvino` branch) with a few fixes ahead of
-  upstream — external-trigger silence auto-stop, an OpenVINO Whisper
-  patch, and an experimental sliding-window streaming engine. Point
-  the systemd unit / `voxtype daemon` invocation at that build.
+  `--features openvino-whisper`, on `PATH` as `voxtype`. This project
+  currently targets a personal fork/branch with a few fixes ahead of
+  upstream — external-trigger silence auto-stop, and a sliding-window
+  streaming engine (rebuilt on top of
+  [#547](https://github.com/peteonrails/voxtype/pull/547)'s OpenVINO
+  backend rather than duplicating one) with an experimental
+  `streaming_revision_mode` (types immediately, corrects via backspace
+  if wrong, instead of waiting for two ticks to agree — see that PR's
+  branch and voxtype's own `docs/CONFIGURATION.md` for the current
+  state; growing-mode revision has a known live bug being tracked
+  there, sliding mode is solid). Point the systemd unit / `voxtype
+  daemon` invocation at that build.
 - **`uv`** (for `omarchy-novad setup wake-model`, which fetches
   openWakeWord + ONNX into a throwaway env to convert a wake-word
   model — nothing installs persistently).
@@ -111,6 +119,120 @@ qs -p quickshell
 | `~/.cache/omarchy-novad/wake-cache/` | Compiled NPU device blobs (wake models) |
 | `~/.cache/omarchy-novad/llm-cache/` | Compiled device blobs (`omarchy-novad serve`'s model) |
 | `$XDG_RUNTIME_DIR/omarchy-novad/` | Popup state file + control socket (ephemeral) |
+
+## Configuration
+
+`~/.config/omarchy-novad/config.toml` (mode 600 — it holds real
+tokens/passwords). Every CLI flag still works and wins when passed;
+the file only needs to hold what you want to override, or (for
+`[home_assistant]`/`[bluebubbles]`) can't safely pass as a flag at all
+(shell history and `/proc/<pid>/cmdline` are both readable by every
+process running as your user). Missing file, or a missing section
+within it, behaves exactly like before this file existed.
+
+```toml
+[detect]
+# wakeword = "hey_jarvis"
+# device = "NPU"
+# classify_base_url = "http://127.0.0.1:8420"
+# classify_model_id = "qwen3-1.7b-instruct"
+
+[serve]
+# device = "GPU"
+# model_id = "novad-local"
+# port = 8420
+
+[home_assistant]
+url = "https://ha.example.com"
+token = "..."
+# allowed_entities = ["light.living_room", "lock.front_door"]
+
+[bluebubbles]
+server_url = "https://your-bluebubbles-server"
+password = "..."
+[bluebubbles.contacts]
+# mom = "iMessage;-;+15551234567"
+```
+
+See [Home Assistant setup](#home-assistant-setup) and
+[BlueBubbles setup](#bluebubbles-setup) below for what each section
+actually needs.
+
+## Home Assistant setup
+
+`HOME_ASSISTANT` intent — "turn on the living room lights", "lock the
+front door", "set the thermostat to 68", "is the garage door closed"
+— talks to Home Assistant's plain REST API directly (`src/router/
+home_assistant.rs`), not through the `hass` Omarchy shell plugin
+already on this system: that plugin's bridge process is spawned by
+its own Service.qml as a child process communicating over that
+process's own stdin/stdout, with no socket/port reachable from
+outside the shell to plug into.
+
+1. In Home Assistant: profile → Security → Long-Lived Access Tokens →
+   create one.
+2. Add `[home_assistant]` to `config.toml` (see
+   [Configuration](#configuration)) with your instance's `url` and
+   that `token`.
+3. Optional: `allowed_entities` restricts voice control to specific
+   entity IDs. Omitted/empty means every entity HA reports is
+   controllable.
+
+Entity names are fuzzy-matched (exact friendly name → substring →
+word-overlap, preserving location qualifiers like "upstairs"/"garage"
+so they don't cross-match) — spoken names don't need to match HA's
+friendly names exactly. Compound commands work too ("turn on
+downstairs and turn off upstairs lights").
+
+## BlueBubbles setup
+
+`MESSAGE` intent — "text mom I'm running late", "send a message to
+sarah saying I'll be there soon" — sends iMessages through a
+self-hosted [BlueBubbles](https://bluebubbles.app) server (a Mac
+running the BlueBubbles Server app, exposing a local REST API).
+Started as a port of a working `~/.agents/skills/bluebubbles` OmaPilot
+skill; `src/router/bluebubbles.rs` reimplements its verified send call
+in Rust and adds real contact resolution on top.
+
+1. In the BlueBubbles Server app on the Mac: note the server URL and
+   password from its own settings.
+2. Add `[bluebubbles]` to `config.toml` with `server_url` and
+   `password`.
+3. That's it for anyone already in that Mac's Contacts app — "text
+   `<name>`" resolves live against `GET /api/v1/contact`, fuzzy-matched
+   on full name then first name (erroring with the candidate list if
+   ambiguous, e.g. two different Sarahs, rather than guessing), then
+   either sends into an existing 1:1 thread or starts a brand-new
+   conversation if none exists yet. Verified live that modern macOS
+   (Big Sur+) requires the first message and the address together to
+   create a chat at all — there's no separate "start an empty
+   conversation" step, so this is one atomic action either way.
+4. `[bluebubbles.contacts]` is a manual name → chat-GUID override,
+   only needed for an alias ("mom" for someone Contacts has under
+   their legal name) or someone not in Contacts at all.
+
+`method: "private-api"` (used for every send) requires the BlueBubbles
+Private API helper installed on the Mac — see BlueBubbles' own docs if
+sends fail with a private-API-related error.
+
+## Confirmation flow
+
+Some actions need a human in the loop before they run — currently a
+`TERMINAL` command that isn't in the safe-readonly allowlist
+(`terminal::is_safe_readonly`), and every `MESSAGE` (texting a real
+person is a much higher-stakes, harder-to-undo action than toggling a
+light, so it never sends straight from the classifier's output the
+way `HOME_ASSISTANT` does).
+
+`router::route` returns `RouteResult::NeedsConfirmation { preview,
+kind }` for these; `pipeline.rs` shows the popup in
+`PopupPhase::Confirming` with `preview` as the text (e.g. `Text Sarah:
+"running late, be there in 10"`, or `... (new conversation)` when
+BlueBubbles is about to start a fresh thread), waits for an
+Approve/Deny click, and only then calls `router::run_confirmed(kind,
+...)` to actually execute. `ConfirmKind` is what makes this
+extensible — a future confirmable intent just adds a variant and an
+arm in `run_confirmed`, the popup/pipeline plumbing doesn't change.
 
 ## OpenClaw setup
 
@@ -213,18 +335,25 @@ should show "Asking OpenClaw…" and come back with a real answer.
 ## Known classifier gaps
 
 The intent classifier (a small local model, see [Setup](#setup)) is
-tuned but not perfect. Two known residual misclassifications, both
-currently harmless since neither target intent has a local handler
-(`HOME_ASSISTANT` and `MEMORY_RETURN` both fall through to plain
-dictation either way):
+tuned but not perfect. Two known residual misclassifications:
 
-- "turn on the living room lights" → classified `SYSTEM_CONTROL`
-  instead of `HOME_ASSISTANT`
+- "turn on the living room lights" (and similar — "turn on Sophie's
+  room", a device-type-free area/person name) → classified
+  `SYSTEM_CONTROL` instead of `HOME_ASSISTANT`. No longer harmless
+  now that `HOME_ASSISTANT` has a real handler, but caught by a
+  recovery check in `router::route`'s `SYSTEM_CONTROL` arm
+  (`home_assistant::looks_like_home_assistant_command`, same pattern
+  `media_control::looks_like_media_command` already used for
+  transport commands like "pause"/"stop `<player>`") before it ever
+  reaches `system_control::run`.
 - "what did I tell you to remember" → classified `HOME_ASSISTANT`
-  instead of `MEMORY_RETURN`
+  instead of `MEMORY_RETURN`. Still harmless: `MEMORY_RETURN` has no
+  local handler, and `HOME_ASSISTANT` correctly finds no matching
+  entity for a phrase like this, so it fails closed rather than
+  acting on the wrong thing.
 
-If `HOME_ASSISTANT`/`MEMORY_RETURN` ever get real handlers, revisit
-the system prompt in `src/classify/mod.rs`.
+If `MEMORY_RETURN` ever gets a real handler, revisit the system
+prompt in `src/classify/mod.rs`.
 
 ## Roadmap
 
@@ -238,9 +367,11 @@ the system prompt in `src/classify/mod.rs`.
   daemon's own `qs -p` invocation into the shell's plugin lifecycle.
   Run `omarchy plugin validate <folder>` against whatever's built to
   confirm it actually passes the schema the shell enforces.
-- **Config menu.** No persistent config file yet — everything is CLI
-  flags. A Quickshell-based settings UI (wake word, classify model,
-  OpenClaw on/off) is a natural pairing with the plugin work above.
+- **Config menu.** `config.toml` (see [Configuration](#configuration))
+  covers everything now, but only as a text file — a Quickshell-based
+  settings UI (wake word, classify model, Home Assistant/BlueBubbles
+  credentials, OpenClaw on/off) is a natural pairing with the plugin
+  work above.
 - **Spotify integration**, ported from nova-npu's
   `integrations/spotify.py` (OAuth + Web API playback control) — MPRIS
   alone covers local players; Spotify's own Web API would add

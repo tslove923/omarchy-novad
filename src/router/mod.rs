@@ -11,6 +11,7 @@
 //! yet, and guessing wrong there is worse than admitting "not yet."
 
 mod app_launcher;
+mod bluebubbles;
 pub mod home_assistant;
 mod media_control;
 mod openclaw;
@@ -19,17 +20,26 @@ mod terminal;
 mod web;
 
 use crate::classify::Intent;
-use crate::config::HomeAssistantConfig;
+use crate::config::{BlueBubblesConfig, HomeAssistantConfig};
+
+/// Which confirmed handler to call once the user approves a
+/// `RouteResult::NeedsConfirmation` in the popup — see [`run_confirmed`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfirmKind {
+    Terminal,
+    Message,
+}
 
 /// Outcome of routing one classified utterance.
 pub enum RouteResult {
     /// Executed immediately; message is shown in the popup's Ready
     /// phase (see `popup::PopupPhase::Ready`).
     Done { success: bool, message: String },
-    /// Needs an Approve/Deny round-trip before running — currently
-    /// only `Intent::Terminal` on a command that isn't in the
-    /// safe-readonly allowlist (see `terminal::is_safe_readonly`).
-    NeedsConfirmation { preview: String },
+    /// Needs an Approve/Deny round-trip before running — a `Terminal`
+    /// command that isn't in the safe-readonly allowlist (see
+    /// `terminal::is_safe_readonly`), or any `Message` (BlueBubbles
+    /// always confirms — see `classify::Intent::Message`'s doc comment).
+    NeedsConfirmation { preview: String, kind: ConfirmKind },
     /// No local handler for this intent (yet). Caller should fall
     /// back to something else — e.g. treat the utterance as plain
     /// dictation instead of a command.
@@ -55,6 +65,7 @@ pub fn route(
     intent: Intent,
     argument: &str,
     home_assistant: Option<&HomeAssistantConfig>,
+    bluebubbles: Option<&BlueBubblesConfig>,
 ) -> RouteResult {
     match intent {
         Intent::OpenApp => {
@@ -132,6 +143,7 @@ pub fn route(
             } else {
                 RouteResult::NeedsConfirmation {
                     preview: format!("Run: {argument}"),
+                    kind: ConfirmKind::Terminal,
                 }
             }
         }
@@ -143,6 +155,19 @@ pub fn route(
                     message: msg,
                 }
             }
+            None => RouteResult::Unhandled,
+        },
+        Intent::Message => match bluebubbles {
+            Some(cfg) => match bluebubbles::prepare(argument, cfg) {
+                Ok(preview) => RouteResult::NeedsConfirmation {
+                    preview,
+                    kind: ConfirmKind::Message,
+                },
+                Err(message) => RouteResult::Done {
+                    success: false,
+                    message,
+                },
+            },
             None => RouteResult::Unhandled,
         },
         // External/Coding don't go through here -- pipeline.rs checks
@@ -164,10 +189,27 @@ pub fn handoff_to_openclaw(utterance: &str) -> (bool, String) {
 }
 
 /// Execute a [`RouteResult::NeedsConfirmation`] command after the user
-/// approved it in the popup. Only `Terminal` ever produces that
-/// variant today, so this only needs to cover that case; a future
-/// confirmable intent should extend this the same way `router.py`'s
-/// `execute_confirmed` did.
-pub fn run_confirmed_terminal(argument: &str) -> (bool, String) {
-    terminal::run(argument)
+/// approved it in the popup — dispatches on the `kind` that came back
+/// with it. `bluebubbles` mirrors `route`'s own parameter: `None` when
+/// `[bluebubbles]` isn't configured, which shouldn't be reachable in
+/// practice (a `ConfirmKind::Message` can only have been produced by
+/// `route` when `bluebubbles` was `Some`), but handled explicitly
+/// rather than assumed away.
+pub fn run_confirmed(
+    kind: ConfirmKind,
+    argument: &str,
+    bluebubbles: Option<&BlueBubblesConfig>,
+) -> (bool, String) {
+    match kind {
+        ConfirmKind::Terminal => terminal::run(argument),
+        ConfirmKind::Message => match bluebubbles {
+            Some(cfg) => bluebubbles::run_confirmed(argument, cfg),
+            None => (
+                false,
+                "BlueBubbles is not configured (approved a Message confirmation with no \
+                 [bluebubbles] section — this shouldn't happen)"
+                    .to_string(),
+            ),
+        },
+    }
 }

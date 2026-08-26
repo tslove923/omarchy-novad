@@ -36,6 +36,14 @@ pub enum Intent {
     /// toggling a light, so unlike `HomeAssistant` it never executes
     /// straight from the classifier's output.
     Message,
+    /// Send a Telegram message, as your own account — see
+    /// `router::telegram`. A separate intent from `Message` rather than
+    /// a channel the same intent picks between: the trigger words don't
+    /// overlap ("telegram"/"tg" vs "text"/"imessage"), and keeping them
+    /// separate means an ambiguous "text" never has to guess which
+    /// service the model meant. Always routes through
+    /// `RouteResult::NeedsConfirmation`, same reasoning as `Message`.
+    Telegram,
     /// Anything the local model shouldn't handle itself — reasoning,
     /// open-ended questions, writing, general knowledge. Handed off to
     /// OpenClaw via `router::handoff_to_openclaw` (see openclaw.rs),
@@ -58,6 +66,7 @@ impl Intent {
             "MEMORY_RETURN" => Some(Self::MemoryReturn),
             "CODING" => Some(Self::Coding),
             "MESSAGE" => Some(Self::Message),
+            "TELEGRAM" => Some(Self::Telegram),
             "EXTERNAL" => Some(Self::External),
             _ => None,
         }
@@ -77,6 +86,7 @@ impl std::fmt::Display for Intent {
             Self::MemoryReturn => "MEMORY_RETURN",
             Self::Coding => "CODING",
             Self::Message => "MESSAGE",
+            Self::Telegram => "TELEGRAM",
             Self::External => "EXTERNAL",
         };
         f.write_str(s)
@@ -132,6 +142,7 @@ MEDIA_CONTROL (music/video playback), \
 MEMORY_RETURN (recall something said earlier), \
 CODING (write/explain/debug code), \
 MESSAGE (send a text/iMessage to a person, e.g. \"text mom I'm running late\"), \
+TELEGRAM (send a Telegram message, e.g. \"telegram sarah are you free tonight\"), \
 EXTERNAL (anything else: open-ended questions, explanations, general \
 knowledge -- the default when nothing else fits). \
 Respond with ONLY two lines, no other text:\n\

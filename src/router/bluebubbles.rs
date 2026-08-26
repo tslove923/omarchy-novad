@@ -98,8 +98,8 @@ fn levenshtein(a: &str, b: &str) -> usize {
     for (i, row) in d.iter_mut().enumerate().take(n + 1) {
         row[0] = i;
     }
-    for j in 0..=m {
-        d[0][j] = j;
+    for (j, cell) in d[0].iter_mut().enumerate() {
+        *cell = j;
     }
     for i in 1..=n {
         for j in 1..=m {
@@ -457,7 +457,10 @@ fn resolve(name: &str, cfg: &BlueBubblesConfig) -> Result<Resolved, String> {
         });
     }
 
-    tracing::debug!("[router:bluebubbles] resolving {name:?} against {}", cfg.server_url);
+    tracing::debug!(
+        "[router:bluebubbles] resolving {name:?} against {}",
+        cfg.server_url
+    );
     let contacts = fetch_contacts(cfg).inspect_err(|e| {
         tracing::warn!("[router:bluebubbles] fetch_contacts failed: {e}");
     })?;
@@ -538,8 +541,12 @@ pub struct PreparedMessage {
 /// `RouteResult::Done`, matching how every other router error surfaces.
 pub fn prepare(arg: &str, cfg: &BlueBubblesConfig) -> Result<PreparedMessage, String> {
     let Some(parsed) = parse_command(arg) else {
-        tracing::warn!("[router:bluebubbles] prepare: couldn't parse a name/message out of {arg:?}");
-        return Err(format!("Couldn't tell who to message or what to say: {arg:?}"));
+        tracing::warn!(
+            "[router:bluebubbles] prepare: couldn't parse a name/message out of {arg:?}"
+        );
+        return Err(format!(
+            "Couldn't tell who to message or what to say: {arg:?}"
+        ));
     };
     tracing::debug!(
         "[router:bluebubbles] prepare: parsed name={:?} text_len={}",
@@ -563,10 +570,16 @@ pub fn prepare(arg: &str, cfg: &BlueBubblesConfig) -> Result<PreparedMessage, St
 /// `PreparedMessage`'s docs); an empty/whitespace-only edit is treated
 /// as an error rather than silently sending nothing or falling back to
 /// the original parse, since either of those would be surprising.
-pub fn run_confirmed(arg: &str, edited_body: Option<&str>, cfg: &BlueBubblesConfig) -> (bool, String) {
+pub fn run_confirmed(
+    arg: &str,
+    edited_body: Option<&str>,
+    cfg: &BlueBubblesConfig,
+) -> (bool, String) {
     tracing::debug!("[router:bluebubbles] run_confirmed: {arg:?} edited_body={edited_body:?}");
     let Some(mut parsed) = parse_command(arg) else {
-        tracing::warn!("[router:bluebubbles] run_confirmed: couldn't parse a name/message out of {arg:?}");
+        tracing::warn!(
+            "[router:bluebubbles] run_confirmed: couldn't parse a name/message out of {arg:?}"
+        );
         return (
             false,
             format!("Couldn't tell who to message or what to say: {arg:?}"),
@@ -575,7 +588,9 @@ pub fn run_confirmed(arg: &str, edited_body: Option<&str>, cfg: &BlueBubblesConf
     if let Some(body) = edited_body {
         let trimmed = body.trim();
         if trimmed.is_empty() {
-            tracing::warn!("[router:bluebubbles] run_confirmed: edited body is empty, refusing to send");
+            tracing::warn!(
+                "[router:bluebubbles] run_confirmed: edited body is empty, refusing to send"
+            );
             return (false, "Message is empty -- not sending".to_string());
         }
         parsed.text = trimmed.to_string();
@@ -741,13 +756,21 @@ mod tests {
     #[test]
     #[ignore]
     fn live_resolve_smoke() {
-        let cfg = crate::config::load().expect("load config").bluebubbles.expect("[bluebubbles] configured");
-        eprintln!("[live_resolve_smoke] fetching contacts from {}...", cfg.server_url);
+        let cfg = crate::config::load()
+            .expect("load config")
+            .bluebubbles
+            .expect("[bluebubbles] configured");
+        eprintln!(
+            "[live_resolve_smoke] fetching contacts from {}...",
+            cfg.server_url
+        );
         let contacts = fetch_contacts(&cfg).expect("fetch_contacts");
         eprintln!("[live_resolve_smoke] got {} contacts", contacts.len());
 
         let Ok(name) = std::env::var("BB_TEST_CONTACT") else {
-            eprintln!("[live_resolve_smoke] BB_TEST_CONTACT not set -- stopping after fetch_contacts");
+            eprintln!(
+                "[live_resolve_smoke] BB_TEST_CONTACT not set -- stopping after fetch_contacts"
+            );
             return;
         };
         let contact = find_best_contact_match(&name, &contacts).expect("find_best_contact_match");
@@ -756,10 +779,14 @@ mod tests {
             contact.display_name,
             contact.addresses.len()
         );
-        let existing = find_existing_direct_chat(&contact.addresses, &cfg).expect("find_existing_direct_chat");
+        let existing =
+            find_existing_direct_chat(&contact.addresses, &cfg).expect("find_existing_direct_chat");
         eprintln!("[live_resolve_smoke] existing direct chat: {existing:?}");
         let resolved = resolve(&name, &cfg).expect("resolve");
-        eprintln!("[live_resolve_smoke] recipient label: {}", recipient_label(&resolved));
+        eprintln!(
+            "[live_resolve_smoke] recipient label: {}",
+            recipient_label(&resolved)
+        );
     }
 
     #[test]
@@ -801,7 +828,9 @@ mod tests {
         assert!(looks_like_message_command(
             "send a message to mom saying hi"
         ));
-        assert!(!looks_like_message_command("turn on the living room lights"));
+        assert!(!looks_like_message_command(
+            "turn on the living room lights"
+        ));
         assert!(!looks_like_message_command("what's my tax rate this year"));
     }
 
@@ -904,7 +933,10 @@ mod tests {
             display_name: "Andrew Heath".to_string(),
             destination: Destination::NewChat("+15037582384".to_string()),
         };
-        assert_eq!(recipient_label(&resolved), "Text Andrew Heath (new conversation)");
+        assert_eq!(
+            recipient_label(&resolved),
+            "Text Andrew Heath (new conversation)"
+        );
 
         let resolved = Resolved {
             display_name: "Andrew Heath".to_string(),

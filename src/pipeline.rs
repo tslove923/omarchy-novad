@@ -16,7 +16,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use crate::classify::{Classifier, Intent};
-use crate::config::{BlueBubblesConfig, HomeAssistantConfig};
+use crate::config::{BlueBubblesConfig, HomeAssistantConfig, TelegramConfig};
 use crate::popup::{self, PopupAction, PopupPhase, PopupState};
 use crate::router::{self, RouteResult};
 
@@ -51,6 +51,10 @@ pub struct PipelineConfig {
     /// falls back to `RouteResult::Unhandled` in that case, same shape
     /// as `home_assistant` above.
     pub bluebubbles: Option<BlueBubblesConfig>,
+    /// `None` when `[telegram]` isn't configured -- `Intent::Telegram`
+    /// falls back to `RouteResult::Unhandled` in that case, same shape
+    /// as `bluebubbles` above.
+    pub telegram: Option<TelegramConfig>,
 }
 
 /// Run one full session after a wake-word detection: start voxtype
@@ -150,14 +154,18 @@ pub fn run_session(cfg: &PipelineConfig) {
     // Recovery: MEMORY_RETURN has no local handler (see router::route's
     // doc comment), so it's a safe bucket to double-check rather than a
     // risk of overriding a confident, actionable classification. If the
-    // *original* transcript's leading word looks like a MESSAGE trigger
-    // verb -- including a plausible ASR mis-hearing, e.g. "tax" for
-    // "text" (observed live: "text Jessica is this working?" came back
-    // transcribed as "Tax is this working.", which the classifier had no
-    // reason to read as anything but MEMORY_RETURN) -- route the full
-    // transcript as a Message instead of the classifier's own argument
-    // extraction, which had already lost whatever didn't survive
-    // transcription. See router::looks_like_message_command's docs.
+    // *original* transcript's leading word looks like a MESSAGE or
+    // TELEGRAM trigger verb -- including a plausible ASR mis-hearing,
+    // e.g. "tax" for "text" (observed live: "text Jessica is this
+    // working?" came back transcribed as "Tax is this working.", which
+    // the classifier had no reason to read as anything but
+    // MEMORY_RETURN) -- route the full transcript instead of the
+    // classifier's own argument extraction, which had already lost
+    // whatever didn't survive transcription. See
+    // router::looks_like_message_command / looks_like_telegram_command's
+    // docs. Checked in this order (Message before Telegram) only because
+    // Message was the one actually observed misfiring live; the trigger
+    // word sets don't overlap so the order otherwise doesn't matter.
     let (route_intent, route_argument) = if result.intent == Intent::MemoryReturn
         && cfg.bluebubbles.is_some()
         && router::looks_like_message_command(&transcript)
@@ -167,6 +175,15 @@ pub fn run_session(cfg: &PipelineConfig) {
              like a mis-heard message trigger): {transcript:?}"
         );
         (Intent::Message, transcript.clone())
+    } else if result.intent == Intent::MemoryReturn
+        && cfg.telegram.is_some()
+        && router::looks_like_telegram_command(&transcript)
+    {
+        tracing::info!(
+            "[pipeline] recovering misclassified MEMORY_RETURN as TELEGRAM (leading word looks \
+             like a mis-heard telegram trigger): {transcript:?}"
+        );
+        (Intent::Telegram, transcript.clone())
     } else {
         (result.intent, result.argument.clone())
     };
@@ -176,6 +193,7 @@ pub fn run_session(cfg: &PipelineConfig) {
         &route_argument,
         cfg.home_assistant.as_ref(),
         cfg.bluebubbles.as_ref(),
+        cfg.telegram.as_ref(),
     ) {
         RouteResult::Done { success, message } => {
             tracing::info!("[pipeline] routed: success={success} message={message:?}");
@@ -204,8 +222,11 @@ pub fn run_session(cfg: &PipelineConfig) {
                         &route_argument,
                         edited_text.as_deref(),
                         cfg.bluebubbles.as_ref(),
+                        cfg.telegram.as_ref(),
                     );
-                    tracing::info!("[pipeline] confirmed and ran: success={ok} message={message:?}");
+                    tracing::info!(
+                        "[pipeline] confirmed and ran: success={ok} message={message:?}"
+                    );
                     show_ready_and_wait(&message);
                 }
                 Some(other) => {

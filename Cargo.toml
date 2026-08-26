@@ -56,12 +56,21 @@ toml_edit = "0.22"
 # make one HTTP call.
 ureq = { version = "2", features = ["json"] }
 
+# Telegram, as your own user account (MTProto), not a bot -- a bot can't
+# cold-DM an arbitrary contact the way "text <name>" needs to (Telegram
+# blocks that), so this has to be the real client protocol, not the
+# HTTP Bot API. See router::telegram's module docs.
+grammers-client = "0.10"
+grammers-session = "0.10"
+
 clap = { version = "4", features = ["derive"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 thiserror = "1"
 anyhow = "1"
 dirs = "5"
+grammers-mtsender = "0.10.0"
+grammers-tl-types = "0.10.0"
 
 [profile.release]
 lto = true

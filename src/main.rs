@@ -125,6 +125,40 @@ enum Command {
         #[arg(long, default_value = "qwen3-coder-30b-a3b")]
         model_id: String,
     },
+
+    /// Send an iMessage via BlueBubbles, non-interactively -- no popup,
+    /// no confirmation round-trip. Meant for a scripted caller that
+    /// already has its own approval step upstream (e.g. an OmaPilot
+    /// skill script, see ~/.agents/skills/bluebubbles), not for
+    /// everyday voice use, which always confirms via the popup instead
+    /// (see `classify::Intent::Message`'s doc comment).
+    Bluebubbles {
+        #[command(subcommand)]
+        what: BluebubblesCommand,
+    },
+
+    /// Send a Telegram message (as your own account) and one-time login,
+    /// same non-interactive shape as `Bluebubbles` above.
+    Telegram {
+        #[command(subcommand)]
+        what: TelegramCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum BluebubblesCommand {
+    /// Resolve `name` against the Mac's real Contacts and send `text`
+    /// to them -- same resolution/send path `Intent::Message` uses
+    /// after the popup's Approve, just without the popup.
+    Send { name: String, text: String },
+}
+
+#[derive(Subcommand)]
+enum TelegramCommand {
+    /// Resolve `name` against your Telegram contacts and send `text` to
+    /// them -- same resolution/send path `Intent::Telegram` uses after
+    /// the popup's Approve, just without the popup.
+    Send { name: String, text: String },
 }
 
 #[derive(Subcommand)]
@@ -138,6 +172,13 @@ enum SetupCommand {
         #[arg(default_value = "hey_jarvis")]
         wakeword: String,
     },
+
+    /// Interactive Telegram login (phone number, code, 2FA password if
+    /// enabled) -- required once before `Intent::Telegram` or
+    /// `omarchy-novad telegram send` can do anything. Requires
+    /// `[telegram]` (api_id/api_hash from https://my.telegram.org/apps)
+    /// already in config.toml; see README's Telegram setup section.
+    TelegramAuth,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -177,6 +218,7 @@ fn main() -> anyhow::Result<()> {
                 config::resolve_opt(on_detect, d.on_detect.clone()),
                 file_config.home_assistant,
                 file_config.bluebubbles,
+                file_config.telegram,
             )
         }
         Command::Serve {
@@ -201,6 +243,9 @@ fn main() -> anyhow::Result<()> {
         Command::Setup {
             what: SetupCommand::WakeModel { wakeword },
         } => Ok(wake::setup::run(&wakeword)?),
+        Command::Setup {
+            what: SetupCommand::TelegramAuth,
+        } => run_telegram_auth(file_config.telegram),
         Command::Respond { action, text } => popup::respond(&action, text.as_deref()),
         Command::PopupDemo => run_popup_demo(),
         Command::Classify {
@@ -208,6 +253,12 @@ fn main() -> anyhow::Result<()> {
             base_url,
             model_id,
         } => run_classify(&text, &base_url, &model_id),
+        Command::Bluebubbles {
+            what: BluebubblesCommand::Send { name, text },
+        } => run_bluebubbles_send(&name, &text, file_config.bluebubbles),
+        Command::Telegram {
+            what: TelegramCommand::Send { name, text },
+        } => run_telegram_send(&name, &text, file_config.telegram),
     }
 }
 
@@ -218,6 +269,83 @@ fn run_classify(text: &str, base_url: &str, model_id: &str) -> anyhow::Result<()
     println!("argument: {}", result.argument);
     println!("latency:  {:.2}s", result.latency.as_secs_f32());
     Ok(())
+}
+
+fn run_bluebubbles_send(
+    name: &str,
+    text: &str,
+    bluebubbles: Option<config::BlueBubblesConfig>,
+) -> anyhow::Result<()> {
+    let Some(cfg) = bluebubbles else {
+        anyhow::bail!(
+            "[bluebubbles] is not configured in config.toml -- see README's setup section"
+        );
+    };
+    let (ok, message) = router::bluebubbles_send(name, text, &cfg);
+    println!("{message}");
+    if ok {
+        Ok(())
+    } else {
+        std::process::exit(1);
+    }
+}
+
+fn run_telegram_send(
+    name: &str,
+    text: &str,
+    telegram: Option<config::TelegramConfig>,
+) -> anyhow::Result<()> {
+    let Some(cfg) = telegram else {
+        anyhow::bail!("[telegram] is not configured in config.toml -- see README's setup section");
+    };
+    let (ok, message) = router::telegram_send(name, text, &cfg);
+    println!("{message}");
+    if ok {
+        Ok(())
+    } else {
+        std::process::exit(1);
+    }
+}
+
+fn run_telegram_auth(telegram: Option<config::TelegramConfig>) -> anyhow::Result<()> {
+    let Some(cfg) = telegram else {
+        anyhow::bail!(
+            "[telegram] is not configured in config.toml yet -- add api_id/api_hash from \
+             https://my.telegram.org/apps first, see README's Telegram setup section"
+        );
+    };
+    if let Some(parent) = cfg.session_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let result = router::telegram_login(
+        &cfg,
+        || prompt("Enter your phone number (international format, e.g. +1 415 555 0132): "),
+        || prompt("Enter the code Telegram sent you: "),
+        |hint| {
+            let hint = hint.unwrap_or("none");
+            // Echoes in the terminal -- this is a one-time interactive
+            // setup command, not something scripted/piped, and 2FA
+            // passwords are rare enough here not to justify pulling in
+            // a terminal-raw-mode dependency just for this one prompt.
+            prompt(&format!("Enter your 2FA password (hint: {hint}): "))
+        },
+    );
+    match result {
+        Ok(message) => {
+            println!("{message}");
+            Ok(())
+        }
+        Err(message) => anyhow::bail!(message),
+    }
+}
+
+fn prompt(message: &str) -> String {
+    use std::io::Write;
+    print!("{message}");
+    let _ = std::io::stdout().flush();
+    let mut line = String::new();
+    let _ = std::io::stdin().read_line(&mut line);
+    line.trim().to_string()
 }
 
 fn run_popup_demo() -> anyhow::Result<()> {
@@ -367,6 +495,7 @@ fn run_detect(
     on_detect: Option<String>,
     home_assistant: Option<config::HomeAssistantConfig>,
     bluebubbles: Option<config::BlueBubblesConfig>,
+    telegram: Option<config::TelegramConfig>,
 ) -> anyhow::Result<()> {
     let trigger = resolve_trigger(on_detect);
     let detector = Detector::new(wakeword, device, &cache_dir(), threshold, patience)?;
@@ -410,6 +539,7 @@ fn run_detect(
         voxtype_state_path: voxtype_state_path(),
         home_assistant,
         bluebubbles,
+        telegram,
     };
 
     let chunk_samples = listener.chunk_samples();

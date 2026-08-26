@@ -30,6 +30,8 @@ pub struct Config {
     pub home_assistant: Option<HomeAssistantConfig>,
     #[serde(default)]
     pub bluebubbles: Option<BlueBubblesConfig>,
+    #[serde(default)]
+    pub telegram: Option<TelegramConfig>,
     #[allow(dead_code)] // not read until router::spotify lands -- see SpotifyConfig's own TODO
     #[serde(default)]
     pub spotify: Option<SpotifyConfig>,
@@ -126,6 +128,34 @@ pub struct BlueBubblesConfig {
     /// from an incoming-message webhook payload's `data.chats[0].guid`.
     #[serde(default)]
     pub contacts: std::collections::HashMap<String, String>,
+}
+
+/// Telegram, as your own user account (MTProto, not the Bot API -- see
+/// `router::telegram`'s module docs for why). `api_id`/`api_hash` are a
+/// developer credential pair from https://my.telegram.org/apps -- they
+/// identify the *client application*, not you; the same pair could be
+/// shipped in any grammers-based binary. The actual per-account login
+/// (phone number, code, optional 2FA password) happens once via
+/// `omarchy-novad setup telegram-auth` and is persisted to
+/// `session_path`, not stored here.
+#[derive(Debug, Clone, Deserialize)]
+pub struct TelegramConfig {
+    pub api_id: i32,
+    pub api_hash: String,
+    /// Where the logged-in session (a SQLite file holding the
+    /// authorization key) is persisted -- see `router::telegram`'s
+    /// `session_path()`. Losing this file means logging in again;
+    /// leaking it is as sensitive as leaking your Telegram password, so
+    /// it's created mode 600, same as config.toml itself.
+    #[serde(default = "default_telegram_session_path")]
+    pub session_path: PathBuf,
+}
+
+fn default_telegram_session_path() -> PathBuf {
+    dirs::data_dir()
+        .unwrap_or_else(std::env::temp_dir)
+        .join("omarchy-novad")
+        .join("telegram.session")
 }
 
 /// Spotify OAuth (PKCE) config + stored tokens -- see

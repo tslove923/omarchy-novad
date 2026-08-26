@@ -4,11 +4,12 @@
 //! a simple local handler (app launch, web search/open, system
 //! volume/brightness, MPRIS media control, Home Assistant when
 //! `[home_assistant]` is configured -- see config.rs) plus TERMINAL,
-//! which needs a confirm round-trip through the popup before running
-//! anything, and EXTERNAL/CODING, which hand off to a real reasoning
-//! agent via `openclaw` (see openclaw.rs). MEMORY_RETURN still falls
-//! through to [`RouteResult::Unhandled`] -- no local handler for it
-//! yet, and guessing wrong there is worse than admitting "not yet."
+//! MESSAGE, and TELEGRAM, which need a confirm round-trip through the
+//! popup before running anything, and EXTERNAL/CODING, which hand off
+//! to a real reasoning agent via `openclaw` (see openclaw.rs).
+//! MEMORY_RETURN still falls through to [`RouteResult::Unhandled`] --
+//! no local handler for it yet, and guessing wrong there is worse than
+//! admitting "not yet."
 
 mod app_launcher;
 mod bluebubbles;
@@ -16,11 +17,12 @@ pub mod home_assistant;
 mod media_control;
 mod openclaw;
 mod system_control;
+mod telegram;
 mod terminal;
 mod web;
 
 use crate::classify::Intent;
-use crate::config::{BlueBubblesConfig, HomeAssistantConfig};
+use crate::config::{BlueBubblesConfig, HomeAssistantConfig, TelegramConfig};
 
 /// Which confirmed handler to call once the user approves a
 /// `RouteResult::NeedsConfirmation` in the popup — see [`run_confirmed`].
@@ -28,6 +30,7 @@ use crate::config::{BlueBubblesConfig, HomeAssistantConfig};
 pub enum ConfirmKind {
     Terminal,
     Message,
+    Telegram,
 }
 
 /// Outcome of routing one classified utterance.
@@ -37,19 +40,20 @@ pub enum RouteResult {
     Done { success: bool, message: String },
     /// Needs an Approve/Deny round-trip before running — a `Terminal`
     /// command that isn't in the safe-readonly allowlist (see
-    /// `terminal::is_safe_readonly`), or any `Message` (BlueBubbles
-    /// always confirms — see `classify::Intent::Message`'s doc comment).
+    /// `terminal::is_safe_readonly`), or any `Message`/`Telegram` (both
+    /// always confirm — see `classify::Intent::Message`'s doc comment).
     NeedsConfirmation {
         /// Short header shown above `body` in the popup, e.g. "Text
         /// Jessica" or "Text Jessica (new conversation)" for a Message
-        /// confirmation. `None` when `body` alone already says enough
-        /// (Terminal's "Run: <command>" needs no separate header).
+        /// confirmation, or "Telegram Sarah" for a Telegram one. `None`
+        /// when `body` alone already says enough (Terminal's "Run:
+        /// <command>" needs no separate header).
         label: Option<String>,
         /// What's shown — and, when `editable` is true, can be changed
         /// before Approve — in the popup's main text area.
         body: String,
         /// Whether `body` should render as an edit box rather than
-        /// plain text. True only for `Message` today; Terminal commands
+        /// plain text. True for `Message`/`Telegram`; Terminal commands
         /// aren't edit-before-run (`run_confirmed`'s `edited_text`
         /// plumbing already supports it if that ever changes).
         editable: bool,
@@ -81,6 +85,7 @@ pub fn route(
     argument: &str,
     home_assistant: Option<&HomeAssistantConfig>,
     bluebubbles: Option<&BlueBubblesConfig>,
+    telegram: Option<&TelegramConfig>,
 ) -> RouteResult {
     match intent {
         Intent::OpenApp => {
@@ -189,6 +194,21 @@ pub fn route(
             },
             None => RouteResult::Unhandled,
         },
+        Intent::Telegram => match telegram {
+            Some(cfg) => match telegram::prepare(argument, cfg) {
+                Ok(prepared) => RouteResult::NeedsConfirmation {
+                    label: Some(prepared.label),
+                    body: prepared.body,
+                    editable: true,
+                    kind: ConfirmKind::Telegram,
+                },
+                Err(message) => RouteResult::Done {
+                    success: false,
+                    message,
+                },
+            },
+            None => RouteResult::Unhandled,
+        },
         // External/Coding don't go through here -- pipeline.rs checks
         // is_external_handoff() before calling route() and calls
         // openclaw::handoff() directly against the full transcript
@@ -221,6 +241,12 @@ pub fn looks_like_message_command(text: &str) -> bool {
     bluebubbles::looks_like_message_command(text)
 }
 
+/// Same recovery, Telegram side -- see
+/// `telegram::looks_like_telegram_command`'s docs.
+pub fn looks_like_telegram_command(text: &str) -> bool {
+    telegram::looks_like_telegram_command(text)
+}
+
 /// Execute a [`RouteResult::NeedsConfirmation`] command after the user
 /// approved it in the popup — dispatches on the `kind` that came back
 /// with it. `bluebubbles` mirrors `route`'s own parameter: `None` when
@@ -240,6 +266,7 @@ pub fn run_confirmed(
     argument: &str,
     edited_text: Option<&str>,
     bluebubbles: Option<&BlueBubblesConfig>,
+    telegram: Option<&TelegramConfig>,
 ) -> (bool, String) {
     match kind {
         ConfirmKind::Terminal => terminal::run(edited_text.unwrap_or(argument)),
@@ -252,5 +279,41 @@ pub fn run_confirmed(
                     .to_string(),
             ),
         },
+        ConfirmKind::Telegram => match telegram {
+            Some(cfg) => telegram::run_confirmed(argument, edited_text, cfg),
+            None => (
+                false,
+                "Telegram is not configured (approved a Telegram confirmation with no \
+                 [telegram] section — this shouldn't happen)"
+                    .to_string(),
+            ),
+        },
     }
+}
+
+/// One-time interactive Telegram login -- called by `omarchy-novad
+/// setup telegram-auth` (see main.rs). See `telegram::login`'s docs.
+pub fn telegram_login(
+    cfg: &TelegramConfig,
+    prompt_phone: impl FnOnce() -> String,
+    prompt_code: impl FnOnce() -> String,
+    prompt_password: impl FnOnce(Option<&str>) -> String,
+) -> Result<String, String> {
+    telegram::login(cfg, prompt_phone, prompt_code, prompt_password)
+}
+
+/// Direct, non-interactive send -- bypasses the confirm popup entirely.
+/// Used by `omarchy-novad telegram send <name> <text>` (see main.rs),
+/// itself meant for scripted callers (e.g. an OmaPilot skill script)
+/// that already have their own approval step upstream, not for the
+/// voice pipeline, which always confirms via the popup instead (see
+/// `Intent::Telegram`'s doc comment).
+pub fn telegram_send(name: &str, text: &str, cfg: &TelegramConfig) -> (bool, String) {
+    telegram::run_confirmed(&format!("telegram {name} saying {text}"), None, cfg)
+}
+
+/// Same direct-send escape hatch, BlueBubbles side -- see
+/// `telegram_send`'s docs for why this exists and who calls it.
+pub fn bluebubbles_send(name: &str, text: &str, cfg: &BlueBubblesConfig) -> (bool, String) {
+    bluebubbles::run_confirmed(&format!("text {name} saying {text}"), None, cfg)
 }

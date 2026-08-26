@@ -167,6 +167,10 @@ password = "..."
 [bluebubbles.contacts]
 # mom = "iMessage;-;+15551234567"
 
+[telegram]
+api_id = 12345678
+api_hash = "..."
+
 [omapilot]
 # fallback = false
 # direct_target = false
@@ -179,6 +183,7 @@ password = "..."
 
 See [Home Assistant setup](#home-assistant-setup),
 [BlueBubbles setup](#bluebubbles-setup),
+[Telegram setup](#telegram-setup),
 [OmaPilot integration](#omapilot-integration), and
 [OpenClaw setup](#openclaw-setup) below for what each section
 actually needs.
@@ -239,6 +244,46 @@ in Rust and adds real contact resolution on top.
 `method: "private-api"` (used for every send) requires the BlueBubbles
 Private API helper installed on the Mac — see BlueBubbles' own docs if
 sends fail with a private-API-related error.
+
+## Telegram setup
+
+`TELEGRAM` intent — "telegram sarah are you free tonight" — sends a
+Telegram message as *your own account* via MTProto
+([`grammers`](https://github.com/Lonami/grammers)), not the Bot API: a
+bot can't cold-DM an arbitrary contact (Telegram blocks that), which
+"telegram `<name>` ..." fundamentally needs. Shape mirrors
+[BlueBubbles setup](#bluebubbles-setup) closely: name resolution
+against real Telegram contacts, same confirm-before-send popup flow,
+same fuzzy-leading-verb tolerance for ASR mis-hearings.
+
+Deliberately a separate intent from `MESSAGE`, not a channel the same
+intent picks between — the trigger words don't overlap at all
+(`"telegram"` only, vs. `MESSAGE`'s `"text"`/`"message"`/`"tell"`/
+`"imessage"`), so anything you'd normally say to text someone always
+goes to BlueBubbles by default; Telegram only fires when you actually
+say "telegram."
+
+1. Get an `api_id`/`api_hash` pair from
+   [my.telegram.org/apps](https://my.telegram.org/apps) (log in with
+   your own phone number, register any app name/platform — this
+   credential identifies the *client application*, not you; the same
+   pair could ship in any grammers-based binary).
+2. Add `[telegram]` to `config.toml`:
+   ```toml
+   [telegram]
+   api_id = 12345678
+   api_hash = "your_api_hash_here"
+   # session_path defaults to ~/.local/share/omarchy-novad/telegram.session
+   ```
+3. One-time interactive login: `omarchy-novad setup telegram-auth`
+   (phone number, the code Telegram texts/sends you, and your 2FA
+   password if you have one enabled). Persists the logged-in session
+   to `session_path` — mode 600, as sensitive as your Telegram password
+   itself; losing it just means logging in again, leaking it is a real
+   account compromise.
+4. That's it — "telegram `<name>` `<message>`" resolves live against
+   your real Telegram contacts the same way BlueBubbles resolves
+   against macOS Contacts.
 
 ## Confirmation flow
 

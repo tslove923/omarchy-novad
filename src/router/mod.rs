@@ -39,7 +39,22 @@ pub enum RouteResult {
     /// command that isn't in the safe-readonly allowlist (see
     /// `terminal::is_safe_readonly`), or any `Message` (BlueBubbles
     /// always confirms — see `classify::Intent::Message`'s doc comment).
-    NeedsConfirmation { preview: String, kind: ConfirmKind },
+    NeedsConfirmation {
+        /// Short header shown above `body` in the popup, e.g. "Text
+        /// Jessica" or "Text Jessica (new conversation)" for a Message
+        /// confirmation. `None` when `body` alone already says enough
+        /// (Terminal's "Run: <command>" needs no separate header).
+        label: Option<String>,
+        /// What's shown — and, when `editable` is true, can be changed
+        /// before Approve — in the popup's main text area.
+        body: String,
+        /// Whether `body` should render as an edit box rather than
+        /// plain text. True only for `Message` today; Terminal commands
+        /// aren't edit-before-run (`run_confirmed`'s `edited_text`
+        /// plumbing already supports it if that ever changes).
+        editable: bool,
+        kind: ConfirmKind,
+    },
     /// No local handler for this intent (yet). Caller should fall
     /// back to something else — e.g. treat the utterance as plain
     /// dictation instead of a command.
@@ -142,7 +157,9 @@ pub fn route(
                 }
             } else {
                 RouteResult::NeedsConfirmation {
-                    preview: format!("Run: {argument}"),
+                    label: None,
+                    body: format!("Run: {argument}"),
+                    editable: false,
                     kind: ConfirmKind::Terminal,
                 }
             }
@@ -159,8 +176,10 @@ pub fn route(
         },
         Intent::Message => match bluebubbles {
             Some(cfg) => match bluebubbles::prepare(argument, cfg) {
-                Ok(preview) => RouteResult::NeedsConfirmation {
-                    preview,
+                Ok(prepared) => RouteResult::NeedsConfirmation {
+                    label: Some(prepared.label),
+                    body: prepared.body,
+                    editable: true,
                     kind: ConfirmKind::Message,
                 },
                 Err(message) => RouteResult::Done {
@@ -188,22 +207,44 @@ pub fn handoff_to_openclaw(utterance: &str) -> (bool, String) {
     openclaw::handoff(utterance)
 }
 
+/// Recovery check: does `text` (meant to be the full transcript, not
+/// the classifier's own argument extraction) look like a MESSAGE
+/// command by its leading word(s), even though the classifier picked a
+/// different intent? See `bluebubbles::looks_like_message_command`'s
+/// docs. pipeline.rs uses this the same way `route`'s own
+/// `SYSTEM_CONTROL` arm above uses `media_control`/`home_assistant`'s
+/// `looks_like_*` checkers, just one level up -- it needs the *full*
+/// transcript (a mis-heard leading verb can leave nothing recognizable
+/// in the classifier's own, often keyword-stripped, argument), which
+/// `route` itself never receives.
+pub fn looks_like_message_command(text: &str) -> bool {
+    bluebubbles::looks_like_message_command(text)
+}
+
 /// Execute a [`RouteResult::NeedsConfirmation`] command after the user
 /// approved it in the popup — dispatches on the `kind` that came back
 /// with it. `bluebubbles` mirrors `route`'s own parameter: `None` when
 /// `[bluebubbles]` isn't configured, which shouldn't be reachable in
 /// practice (a `ConfirmKind::Message` can only have been produced by
 /// `route` when `bluebubbles` was `Some`), but handled explicitly
-/// rather than assumed away.
+/// rather than assumed away. `edited_text` is whatever was left in the
+/// popup's editable box when Approve was clicked (see
+/// `popup::PopupAction::Approve`) -- `None` if the confirmation wasn't
+/// editable, or the user approved without touching it. Only
+/// `ConfirmKind::Message` renders an edit box today (see
+/// `RouteResult::NeedsConfirmation`'s `editable` field), but
+/// `ConfirmKind::Terminal` honors an override here too if one somehow
+/// arrives, rather than silently ignoring it.
 pub fn run_confirmed(
     kind: ConfirmKind,
     argument: &str,
+    edited_text: Option<&str>,
     bluebubbles: Option<&BlueBubblesConfig>,
 ) -> (bool, String) {
     match kind {
-        ConfirmKind::Terminal => terminal::run(argument),
+        ConfirmKind::Terminal => terminal::run(edited_text.unwrap_or(argument)),
         ConfirmKind::Message => match bluebubbles {
-            Some(cfg) => bluebubbles::run_confirmed(argument, cfg),
+            Some(cfg) => bluebubbles::run_confirmed(argument, edited_text, cfg),
             None => (
                 false,
                 "BlueBubbles is not configured (approved a Message confirmation with no \

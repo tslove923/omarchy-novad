@@ -80,6 +80,19 @@ Two triggers are supported for what a detected wake word does
 ```bash
 cargo build --release
 
+# Put the built binary on PATH -- every command below assumes
+# `omarchy-novad` resolves bare, and the popup's own Approve/Deny/
+# Insert/Cancel buttons *require* it: they run `omarchy-novad respond
+# <action>` via Quickshell.Io.Process, which execs directly (no shell,
+# no `./target/release/...` shortcut) and silently no-ops if the binary
+# isn't found on the *qs process's own* PATH -- clicking a button just
+# does nothing, with only `qs`'s own log (`~/.local/state/quickshell/
+# by-pid/<pid>/log.qslog`, or wherever `qs` printed "Saving logs to")
+# ever showing "Process failed to start". `~/Work/<project>/bin/` is
+# usually already on PATH (see the `openclaw` symlink further down for
+# the same pattern) -- if yours isn't, use any other PATH directory.
+mkdir -p bin && ln -sf "$(pwd)/target/release/omarchy-novad" bin/omarchy-novad
+
 # One-time: convert a wake-word phrase to NPU-runnable ONNX
 omarchy-novad setup wake-model hey_jarvis
 

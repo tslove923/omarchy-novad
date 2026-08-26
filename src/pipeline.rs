@@ -15,7 +15,7 @@
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use crate::classify::Classifier;
+use crate::classify::{Classifier, Intent};
 use crate::config::{BlueBubblesConfig, HomeAssistantConfig};
 use crate::popup::{self, PopupAction, PopupPhase, PopupState};
 use crate::router::{self, RouteResult};
@@ -65,6 +65,7 @@ pub fn run_session(cfg: &PipelineConfig) {
         phase: PopupPhase::Recording,
         text: String::new(),
         confirm_label: None,
+        editable: false,
     });
 
     if let Err(e) = start_recording(cfg) {
@@ -107,6 +108,7 @@ pub fn run_session(cfg: &PipelineConfig) {
         phase: PopupPhase::Classifying,
         text: transcript.clone(),
         confirm_label: None,
+        editable: false,
     });
 
     let classifier = Classifier::new(cfg.classify_base_url.clone(), cfg.classify_model_id.clone());
@@ -137,6 +139,7 @@ pub fn run_session(cfg: &PipelineConfig) {
             phase: PopupPhase::HandingOff,
             text: transcript.clone(),
             confirm_label: None,
+            editable: false,
         });
         let (success, message) = router::handoff_to_openclaw(&transcript);
         tracing::info!("[pipeline] handed off to openclaw: success={success} message={message:?}");
@@ -144,9 +147,33 @@ pub fn run_session(cfg: &PipelineConfig) {
         return;
     }
 
+    // Recovery: MEMORY_RETURN has no local handler (see router::route's
+    // doc comment), so it's a safe bucket to double-check rather than a
+    // risk of overriding a confident, actionable classification. If the
+    // *original* transcript's leading word looks like a MESSAGE trigger
+    // verb -- including a plausible ASR mis-hearing, e.g. "tax" for
+    // "text" (observed live: "text Jessica is this working?" came back
+    // transcribed as "Tax is this working.", which the classifier had no
+    // reason to read as anything but MEMORY_RETURN) -- route the full
+    // transcript as a Message instead of the classifier's own argument
+    // extraction, which had already lost whatever didn't survive
+    // transcription. See router::looks_like_message_command's docs.
+    let (route_intent, route_argument) = if result.intent == Intent::MemoryReturn
+        && cfg.bluebubbles.is_some()
+        && router::looks_like_message_command(&transcript)
+    {
+        tracing::info!(
+            "[pipeline] recovering misclassified MEMORY_RETURN as MESSAGE (leading word looks \
+             like a mis-heard message trigger): {transcript:?}"
+        );
+        (Intent::Message, transcript.clone())
+    } else {
+        (result.intent, result.argument.clone())
+    };
+
     match router::route(
-        result.intent,
-        &result.argument,
+        route_intent,
+        &route_argument,
         cfg.home_assistant.as_ref(),
         cfg.bluebubbles.as_ref(),
     ) {
@@ -154,19 +181,45 @@ pub fn run_session(cfg: &PipelineConfig) {
             tracing::info!("[pipeline] routed: success={success} message={message:?}");
             show_ready_and_wait(&message);
         }
-        RouteResult::NeedsConfirmation { preview, kind } => {
+        RouteResult::NeedsConfirmation {
+            label,
+            body,
+            editable,
+            kind,
+        } => {
+            tracing::info!(
+                "[pipeline] awaiting confirmation ({kind:?}, editable={editable}): \
+                 label={label:?} body={body:?}"
+            );
             popup::write_state(&PopupState {
                 phase: PopupPhase::Confirming,
-                text: preview.clone(),
-                confirm_label: Some(preview.clone()),
+                text: body,
+                confirm_label: label,
+                editable,
             });
             match wait_for_action() {
-                Some(PopupAction::Approve) => {
-                    let (_ok, message) =
-                        router::run_confirmed(kind, &result.argument, cfg.bluebubbles.as_ref());
+                Some(PopupAction::Approve { edited_text }) => {
+                    let (ok, message) = router::run_confirmed(
+                        kind,
+                        &route_argument,
+                        edited_text.as_deref(),
+                        cfg.bluebubbles.as_ref(),
+                    );
+                    tracing::info!("[pipeline] confirmed and ran: success={ok} message={message:?}");
                     show_ready_and_wait(&message);
                 }
-                _ => popup::write_state(&PopupState::default()),
+                Some(other) => {
+                    tracing::info!("[pipeline] confirmation denied ({other:?}) -- not running");
+                    popup::write_state(&PopupState::default());
+                }
+                None => {
+                    tracing::warn!(
+                        "[pipeline] no response to confirmation within {}s (or control socket \
+                         failed to spawn) -- giving up silently, popup back to idle",
+                        30
+                    );
+                    popup::write_state(&PopupState::default());
+                }
             }
         }
         RouteResult::Unhandled => {
@@ -244,6 +297,7 @@ fn show_ready_and_wait(text: &str) {
         phase: PopupPhase::Ready,
         text: text.to_string(),
         confirm_label: None,
+        editable: false,
     });
     // Ready is dismiss-on-timeout, not dismiss-on-action -- nova's own
     // popup auto-hid the result after a few seconds rather than

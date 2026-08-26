@@ -26,10 +26,31 @@ PanelWindow {
 
     PopupState {
         id: popupState
+
+        // Any real daemon-driven phase change clears a previous manual
+        // dismiss -- otherwise the very next wake-word session would
+        // stay invisible too, which isn't what the × button is for.
+        onPhaseChanged: {
+            if (phase !== "idle") {
+                root.dismissed = false;
+            }
+        }
     }
 
-    readonly property bool hasContent: popupState.phase !== "idle"
+    // Client-side-only escape hatch (see the × button below): hides the
+    // popup immediately regardless of whether the daemon is even still
+    // running to answer a control-socket message -- e.g. a crashed
+    // `omarchy-novad detect` or a stale/orphaned popup process. Not the
+    // same thing as Deny (which needs the daemon alive to act on it);
+    // this is "make it go away right now, no matter what."
+    property bool dismissed: false
+
+    readonly property bool hasContent: popupState.phase !== "idle" && !dismissed
     visible: hasContent
+
+    // Whether the editable message-body box (see `editField` below)
+    // should be showing right now, instead of the plain read-only text.
+    readonly property bool editBoxVisible: popupState.phase === "confirming" && popupState.editable
 
     anchors { top: true; bottom: true; left: true; right: true }
     color: "transparent"
@@ -41,7 +62,17 @@ PanelWindow {
     // its own buttons, and OnDemand focus with no dismiss key/click-away
     // handling left it stealing input with no way to get it back short
     // of killing the process. Real bug, found the hard way.
-    WlrLayershell.keyboardFocus: WlrKeyboardFocus.None
+    //
+    // The one deliberate exception: an editable Message confirmation
+    // (see `editField` below) genuinely needs the keyboard, so this
+    // narrows to `OnDemand` — focus follows normal click-to-focus/
+    // click-away semantics, not a permanent grab — for exactly the
+    // window where there's an edit box on screen, and drops straight
+    // back to `None` the instant that phase ends (Approve/Deny/
+    // timeout), whichever way it ends.
+    WlrLayershell.keyboardFocus: (popupState.phase === "confirming" && popupState.editable)
+        ? WlrKeyboardFocus.OnDemand
+        : WlrKeyboardFocus.None
 
     // Restrict the actually-interactive input region to the card itself
     // — without this, the full-screen anchor above (needed to position
@@ -121,8 +152,10 @@ PanelWindow {
         }
     }
 
-    function respond(action) {
-        respondProcess.command = [novadBinary, "respond", action];
+    function respond(action, text) {
+        respondProcess.command = (text !== undefined && text !== null)
+            ? [novadBinary, "respond", action, "--text", text]
+            : [novadBinary, "respond", action];
         respondProcess.running = true;
     }
 
@@ -201,7 +234,23 @@ PanelWindow {
                 }
             }
 
-            // ── Transcript / response text ──
+            // ── Confirm header — recipient/context line, e.g. "Text
+            //    Jessica" or "Text Jessica (new conversation)" (see
+            //    router::RouteResult::NeedsConfirmation's `label`
+            //    field). Terminal confirmations don't set one — the
+            //    body ("Run: <command>") already says enough. ──
+            Text {
+                width: parent.width
+                text: popupState.confirmLabel
+                color: root.labelColor
+                font.pixelSize: 12
+                font.weight: Font.Medium
+                visible: popupState.phase === "confirming" && popupState.confirmLabel.length > 0
+            }
+
+            // ── Transcript / response text (read-only) — everything
+            //    except an editable Message confirmation, which the
+            //    box right below this one takes over instead. ──
             Text {
                 width: parent.width
                 text: popupState.text.length > 0 ? popupState.text : "…"
@@ -209,7 +258,46 @@ PanelWindow {
                 font.family: "JetBrains Mono"
                 font.pixelSize: 14
                 wrapMode: Text.Wrap
-                visible: popupState.phase !== "idle"
+                visible: popupState.phase !== "idle" && !root.editBoxVisible
+            }
+
+            // ── Editable message body — Confirming + editable only
+            //    (see router::RouteResult::NeedsConfirmation's
+            //    `editable` field). Pre-filled from `popupState.text`;
+            //    whatever's in here when Approve is clicked goes out
+            //    instead of the original parsed text (see
+            //    router::bluebubbles::run_confirmed's `edited_body`). ──
+            Rectangle {
+                width: parent.width
+                height: editField.implicitHeight + 12
+                radius: 6
+                color: Qt.darker(root.bgColor, 1.15)
+                border.width: 1
+                border.color: editField.activeFocus ? root.accent : root.buttonBorder
+                visible: root.editBoxVisible
+
+                Behavior on border.color {
+                    ColorAnimation { duration: 120 }
+                }
+
+                // Grab focus fresh every time this box appears for a new
+                // confirmation (it stays instantiated but hidden the
+                // rest of the time, so Component.onCompleted alone --
+                // which only fires once, ever -- wouldn't refire here).
+                onVisibleChanged: if (visible) editField.forceActiveFocus()
+
+                TextEdit {
+                    id: editField
+                    anchors.fill: parent
+                    anchors.margins: 6
+                    text: popupState.text
+                    color: root.textColor
+                    font.family: "JetBrains Mono"
+                    font.pixelSize: 14
+                    wrapMode: TextEdit.Wrap
+                    selectByMouse: true
+                    focus: root.editBoxVisible
+                }
             }
 
             // ── Confirm bar (Approve / Deny) ──
@@ -228,7 +316,9 @@ PanelWindow {
                     label: "Approve"
                     tint: root.approve
                     primary: true
-                    onClicked: root.respond("approve")
+                    onClicked: root.editBoxVisible
+                        ? root.respond("approve", editField.text)
+                        : root.respond("approve")
                 }
             }
 
@@ -252,6 +342,32 @@ PanelWindow {
                     primary: true
                     onClicked: root.respond("insert")
                 }
+            }
+        }
+
+        // Always-available dismiss button — top-right corner of the
+        // card, present in every phase (not just Confirming/Ready,
+        // which already have their own Deny/Cancel). Exists specifically
+        // for clearing a stray/orphaned popup: best-effort tells the
+        // daemon "deny" (only does anything if it's actually mid-confirm
+        // and listening), but hides locally either way — see
+        // `root.dismissed`'s docs above.
+        PopupButton {
+            // Kept fully inside `card`'s own bounds (not overhung past
+            // its edge) -- the PanelWindow's `mask` region above is
+            // exactly card's rect, and anything outside it is
+            // click-through by design.
+            anchors.top: parent.top
+            anchors.right: parent.right
+            anchors.topMargin: 6
+            anchors.rightMargin: 6
+            label: "×"
+            tint: root.danger
+            implicitWidth: 22
+            implicitHeight: 22
+            onClicked: {
+                root.respond("deny");
+                root.dismissed = true;
             }
         }
     }

@@ -25,7 +25,7 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::sync::mpsc;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// Mirrors nova's popup.js state machine (`idle`, `listening`,
 /// `recording`, `transcribing`, `classifying`, `confirming`, `ready`),
@@ -50,11 +50,21 @@ pub enum PopupPhase {
 pub struct PopupState {
     pub phase: PopupPhase,
     /// Transcript / AI response text shown in the text area. Empty
-    /// string renders the "empty" placeholder state in QML.
+    /// string renders the "empty" placeholder state in QML. When
+    /// `editable` is true, this is the box's *initial* content -- the
+    /// user may change it before Approve (see `PopupAction::Approve`'s
+    /// `edited_text`).
     pub text: String,
-    /// Set only during `Confirming` — the action awaiting approve/deny.
+    /// Set only during `Confirming` — a short header shown above `text`
+    /// (e.g. "Text Jessica"), distinct from the body itself. See
+    /// `router::RouteResult::NeedsConfirmation`'s `label` field.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub confirm_label: Option<String>,
+    /// Whether `text` should render as an editable box rather than
+    /// plain read-only text. Only meaningful (and only ever true) during
+    /// `Confirming` for a `Message` — see
+    /// `router::RouteResult::NeedsConfirmation`'s `editable` field.
+    pub editable: bool,
 }
 
 impl Default for PopupState {
@@ -63,6 +73,7 @@ impl Default for PopupState {
             phase: PopupPhase::Idle,
             text: String::new(),
             confirm_label: None,
+            editable: false,
         }
     }
 }
@@ -105,24 +116,45 @@ pub fn write_state(state: &PopupState) {
 /// Actions the popup can send back. `Insert`/`Cancel` apply to plain
 /// dictation review; `Approve`/`Deny` apply to a pending command
 /// confirmation. Matches the two button bars in the ported popup UI.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// `Approve` carries `edited_text` -- whatever was in the popup's
+/// editable box at click time (see `PopupState::editable`), `None` when
+/// the confirmation wasn't editable or the user didn't change it. Not
+/// `Copy` any more now that a variant owns a `String`.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PopupAction {
     Insert,
     Cancel,
-    Approve,
+    Approve { edited_text: Option<String> },
     Deny,
 }
 
 impl PopupAction {
-    fn parse(s: &str) -> Option<Self> {
-        match s.trim() {
+    /// Builds the [`PopupAction`] a wire `action` name (+ optional
+    /// payload `text`, only meaningful for "approve") refers to, or
+    /// `None` if `action` isn't one of the four recognized words.
+    fn from_wire(action: &str, text: Option<String>) -> Option<Self> {
+        match action.trim() {
             "insert" => Some(Self::Insert),
             "cancel" => Some(Self::Cancel),
-            "approve" => Some(Self::Approve),
+            "approve" => Some(Self::Approve { edited_text: text }),
             "deny" => Some(Self::Deny),
             _ => None,
         }
     }
+}
+
+/// Wire format for a control-socket message: one JSON object per line.
+/// `text` only ever carries anything for `action: "approve"` on an
+/// editable confirmation (see `PopupState::editable`) -- everything else
+/// leaves it `None`. Still accepts a bare action word with no JSON
+/// wrapper too (see `read_one_action`), so `printf 'deny\n' | socat -
+/// UNIX-CONNECT:$XDG_RUNTIME_DIR/omarchy-novad/popup-control.sock`-style
+/// manual testing still works.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ControlMessage {
+    action: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    text: Option<String>,
 }
 
 /// Listens on `control_socket_path()` for one-line actions from `omarchy-novad
@@ -158,7 +190,14 @@ impl ControlServer {
 fn read_one_action(stream: UnixStream) -> Option<PopupAction> {
     let mut line = String::new();
     BufReader::new(stream).read_line(&mut line).ok()?;
-    let action = PopupAction::parse(&line);
+    let trimmed = line.trim();
+    // A bare action word (no JSON) is accepted too -- see
+    // `ControlMessage`'s docs.
+    let msg: ControlMessage = serde_json::from_str(trimmed).unwrap_or_else(|_| ControlMessage {
+        action: trimmed.to_string(),
+        text: None,
+    });
+    let action = PopupAction::from_wire(&msg.action, msg.text);
     if action.is_none() {
         tracing::warn!("popup control socket got unrecognized action: {line:?}");
     }
@@ -166,15 +205,21 @@ fn read_one_action(stream: UnixStream) -> Option<PopupAction> {
 }
 
 /// `omarchy-novad respond <action>` entry point: connect to the running
-/// daemon's control socket and send one action, then exit.
-pub fn respond(action: &str) -> anyhow::Result<()> {
-    if PopupAction::parse(action).is_none() {
+/// daemon's control socket and send one action (+ optional edited
+/// message text, only meaningful with `approve` on an editable
+/// confirmation), then exit.
+pub fn respond(action: &str, text: Option<&str>) -> anyhow::Result<()> {
+    if PopupAction::from_wire(action, None).is_none() {
         anyhow::bail!("unknown action '{action}' (expected: insert, cancel, approve, deny)");
     }
     let path = control_socket_path();
     let mut stream = UnixStream::connect(&path).map_err(|e| {
         anyhow::anyhow!("connect to {path:?}: {e} (is 'omarchy-novad detect' running?)")
     })?;
-    writeln!(stream, "{action}")?;
+    let msg = ControlMessage {
+        action: action.to_string(),
+        text: text.map(String::from),
+    };
+    writeln!(stream, "{}", serde_json::to_string(&msg)?)?;
     Ok(())
 }

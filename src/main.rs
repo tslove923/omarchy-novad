@@ -101,6 +101,12 @@ enum Command {
     Respond {
         #[arg(value_parser = ["insert", "cancel", "approve", "deny"])]
         action: String,
+        /// Edited message body -- only meaningful with `approve` on an
+        /// editable confirmation (see `popup::PopupState::editable`),
+        /// e.g. a Message send. Overrides the parsed text before it
+        /// goes out; ignored for `insert`/`cancel`/`deny`.
+        #[arg(long)]
+        text: Option<String>,
     },
 
     /// Cycle the standalone popup through sample states with no wake
@@ -195,7 +201,7 @@ fn main() -> anyhow::Result<()> {
         Command::Setup {
             what: SetupCommand::WakeModel { wakeword },
         } => Ok(wake::setup::run(&wakeword)?),
-        Command::Respond { action } => popup::respond(&action),
+        Command::Respond { action, text } => popup::respond(&action, text.as_deref()),
         Command::PopupDemo => run_popup_demo(),
         Command::Classify {
             text,
@@ -224,45 +230,67 @@ fn run_popup_demo() -> anyhow::Result<()> {
     println!("[omarchy-novad] Ctrl+C to stop.\n");
 
     loop {
-        let steps: [(PopupPhase, &str, Option<&str>); 6] = [
-            (PopupPhase::Listening, "", None),
-            (PopupPhase::Recording, "", None),
+        // (phase, text, confirm_label, editable) -- `editable` demos the
+        // Message-style edit-before-send confirm (see
+        // `router::RouteResult::NeedsConfirmation`'s `editable` field);
+        // the Terminal-style confirm right after it is the plain,
+        // non-editable case for comparison.
+        let steps: [(PopupPhase, &str, Option<&str>, bool); 7] = [
+            (PopupPhase::Listening, "", None, false),
+            (PopupPhase::Recording, "", None, false),
             (
                 PopupPhase::Transcribing,
-                "open firefox and check my calendar",
+                "text jessica is this working",
                 None,
+                false,
             ),
             (
                 PopupPhase::Classifying,
-                "open firefox and check my calendar",
+                "text jessica is this working",
                 None,
+                false,
+            ),
+            (
+                PopupPhase::Confirming,
+                "is this working",
+                Some("Text Jessica"),
+                true,
             ),
             (
                 PopupPhase::Confirming,
                 "Run: firefox --new-window calendar.google.com",
-                Some("Open Firefox to your calendar?"),
+                None,
+                false,
             ),
-            (PopupPhase::Ready, "Done.", None),
+            (PopupPhase::Ready, "Done.", None, false),
         ];
 
-        for (phase, text, confirm_label) in steps {
+        for (phase, text, confirm_label, editable) in steps {
             println!("[omarchy-novad] phase -> {phase:?}");
             popup::write_state(&PopupState {
                 phase,
                 text: text.to_string(),
                 confirm_label: confirm_label.map(String::from),
+                editable,
             });
 
             if phase == PopupPhase::Confirming {
                 println!("[omarchy-novad] waiting for 'omarchy-novad respond approve|deny'...");
                 match rx.recv() {
-                    Ok(PopupAction::Approve) => println!("[omarchy-novad] approved"),
+                    Ok(PopupAction::Approve { edited_text }) => println!(
+                        "[omarchy-novad] approved{}",
+                        edited_text
+                            .as_deref()
+                            .map(|t| format!(" (edited to: {t:?})"))
+                            .unwrap_or_default()
+                    ),
                     Ok(PopupAction::Deny) => {
                         println!("[omarchy-novad] denied");
                         popup::write_state(&PopupState {
                             phase: PopupPhase::Idle,
                             text: String::new(),
                             confirm_label: None,
+                            editable: false,
                         });
                         std::thread::sleep(Duration::from_secs(2));
                         continue;

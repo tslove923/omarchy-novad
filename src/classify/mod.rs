@@ -227,6 +227,27 @@ fn strip_thinking(content: &str) -> &str {
     }
 }
 
+/// The model is asked for `ARGUMENT: <words copied verbatim>` but
+/// inconsistently wraps that answer in quotes anyway (observed live:
+/// `ARGUMENT: "text Jessica is this working?"` right alongside
+/// unquoted `ARGUMENT: Turn on the living room, PV.` from the same
+/// session) -- one matching pair of straight quotes around the whole
+/// value is model formatting, not user content, so strip it. This
+/// mattered more than it looks: a leading `"` silently defeated every
+/// `LEADING_PHRASES` prefix match in `router::bluebubbles::parse_command`
+/// (none of them start with a quote), so "text Jessica ..." resolved
+/// the *contact name* to `"text` instead of `Jessica` and failed
+/// closed with "No contact named ... found" -- indistinguishable from
+/// nothing happening at all unless the popup was up to show it.
+fn strip_wrapping_quotes(s: &str) -> &str {
+    for quote in ['"', '\''] {
+        if let Some(inner) = s.strip_prefix(quote).and_then(|s| s.strip_suffix(quote)) {
+            return inner;
+        }
+    }
+    s
+}
+
 fn parse_response(
     content: &str,
     latency: std::time::Duration,
@@ -239,7 +260,7 @@ fn parse_response(
         if let Some(rest) = line.strip_prefix("INTENT:") {
             intent_str = Some(rest.trim().to_string());
         } else if let Some(rest) = line.strip_prefix("ARGUMENT:") {
-            argument = rest.trim().to_string();
+            argument = strip_wrapping_quotes(rest.trim()).to_string();
         }
     }
 
@@ -319,6 +340,30 @@ mod tests {
         .unwrap();
         assert_eq!(result.intent, Intent::WebSearch);
         assert_eq!(result.argument, "best pizza near me");
+    }
+
+    #[test]
+    fn strips_wrapping_quotes_from_argument() {
+        let result = parse_response(
+            "INTENT: MESSAGE\nARGUMENT: \"text Jessica is this working?\"",
+            std::time::Duration::from_millis(1),
+        )
+        .unwrap();
+        assert_eq!(result.intent, Intent::Message);
+        assert_eq!(result.argument, "text Jessica is this working?");
+    }
+
+    #[test]
+    fn leaves_an_inner_quote_alone() {
+        // Only a matching pair wrapping the *whole* value is stripped --
+        // a single stray quote (unbalanced) is left as-is rather than
+        // guessed at.
+        let result = parse_response(
+            "INTENT: MESSAGE\nARGUMENT: text mom say \"hi\" to dad",
+            std::time::Duration::from_millis(1),
+        )
+        .unwrap();
+        assert_eq!(result.argument, "text mom say \"hi\" to dad");
     }
 
     #[test]

@@ -125,6 +125,7 @@ pub fn run_session(cfg: &PipelineConfig) {
                 phase: PopupPhase::HandingOff,
                 text: remainder.to_string(),
                 confirm_label: None,
+                editable: false,
             });
             let (success, message) = router::ask_omapilot(remainder, cfg);
             tracing::info!(

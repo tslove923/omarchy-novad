@@ -12,7 +12,34 @@
 //! module only knows how to invoke it and interpret its exit code,
 //! matching the shell-out pattern `app_launcher`/`web` already use
 //! for their own external processes.
+//!
+//! ## `continue_in_herdr`: opening a real interactive session
+//!
+//! `handoff` below is a one-shot `openclaw agent --message` call --
+//! fast, and (confirmed live) exempt from the device-pairing gate
+//! described next. `openclaw tui`, the *interactive* terminal UI, is
+//! not: it's a persistent "operator" WebSocket session, and the
+//! gateway requires a human (or a scripted stand-in, see
+//! `crate::config::OpenClawConfig::approve_device_command`) to approve
+//! its device identity once before it'll connect -- confirmed live as
+//! a known, currently-unresolved upstream limitation for
+//! token-authenticated remote clients
+//! (<https://github.com/openclaw/openclaw/issues/29908>), not a local
+//! misconfiguration; the one documented workaround
+//! (`gateway.controlUi.allowInsecureAuth`) is itself reported buggy
+//! for reverse-proxied deployments like this one
+//! (<https://github.com/openclaw/openclaw/issues/1679>).
+//!
+//! That gate is exactly why this is a separate, explicit "continue in
+//! Herdr" action rather than folded into the automatic wake-word
+//! handoff: a hands-free trigger that can silently need a human to
+//! approve a device somewhere isn't hands-free. Once approved, though,
+//! the device identity persists for future launches from the same
+//! machine (confirmed live) -- it's a one-time bootstrap cost, not a
+//! per-session tax, so `approve_device_command` only fires when the
+//! gateway actually reports a pending request.
 
+use std::io::Write;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
@@ -121,5 +148,204 @@ pub fn handoff(utterance: &str) -> (bool, String) {
         };
         tracing::warn!("[router:openclaw] handoff failed: {msg}");
         (false, msg.to_string())
+    }
+}
+
+/// How long to wait after launching/relaunching `openclaw tui` before
+/// checking whether it connected -- generous enough to cover a real
+/// WebSocket handshake + gateway auth round-trip, short enough that a
+/// hung launch doesn't stall this indefinitely (this only ever blocks
+/// a synchronous CLI/popup call, same budget class as `HANDOFF_TIMEOUT`
+/// above, not the daemon's own event loop).
+const CONNECT_SETTLE: Duration = Duration::from_secs(3);
+
+/// Substring `openclaw tui` prints when the gateway needs a human (or
+/// `approve_device_command`) to approve this device's pairing request
+/// before it'll connect -- see this module's doc comment.
+const DEVICE_APPROVAL_MARKER: &str = "Device approval needed";
+
+/// Opens `openclaw tui` in a new Herdr tab, attached to the same
+/// gateway session `handoff` uses (`agent:main:novad:CONVERSATION_ID`)
+/// so it picks up right where the automatic handoff's reply left off --
+/// an explicit "continue this conversation" action (see this module's
+/// doc comment for why it's not part of the automatic handoff path).
+/// Mirrors OmaPilot's own `continueInHerdr` in spirit: hand authority
+/// to a real interactive session instead of a flash-and-gone popup
+/// summary.
+pub fn continue_in_herdr(cfg: Option<&crate::config::OpenClawConfig>) -> (bool, String) {
+    let Some((url, token)) = gateway_credentials() else {
+        return (
+            false,
+            "No OpenClaw gateway credentials found (checked $OPENCLAW_NOVAD_ENV or \
+             ~/.config/openclaw-novad.env)"
+                .to_string(),
+        );
+    };
+
+    let Some(script_path) = write_launch_script(&url, &token) else {
+        return (false, "Couldn't write the Herdr launch script".to_string());
+    };
+
+    let Some(pane_id) = open_herdr_tab() else {
+        return (
+            false,
+            "Couldn't open a Herdr tab -- is herdr running?".to_string(),
+        );
+    };
+
+    run_in_pane(&pane_id, &script_path);
+    std::thread::sleep(CONNECT_SETTLE);
+
+    if pane_shows(&pane_id, DEVICE_APPROVAL_MARKER) {
+        match cfg.and_then(|c| c.approve_device_command.as_deref()) {
+            Some(approve_cmd) => {
+                tracing::info!(
+                    "[router:openclaw] device approval pending -- running configured \
+                     approve_device_command"
+                );
+                match Command::new("sh").arg("-c").arg(approve_cmd).status() {
+                    Ok(status) if status.success() => {
+                        // Relaunch to actually connect with the
+                        // now-approved identity -- the pending tui
+                        // process left disconnected by the pairing
+                        // gate doesn't retry on its own.
+                        std::thread::sleep(Duration::from_secs(1));
+                        run_in_pane(&pane_id, &script_path);
+                        std::thread::sleep(CONNECT_SETTLE);
+                    }
+                    Ok(status) => {
+                        tracing::warn!("[router:openclaw] approve_device_command exited {status}");
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "[router:openclaw] failed to run approve_device_command: {e}"
+                        );
+                    }
+                }
+            }
+            None => {
+                tracing::info!(
+                    "[router:openclaw] device approval pending, no approve_device_command \
+                     configured -- left in Herdr for the user to approve"
+                );
+            }
+        }
+    }
+
+    (true, "Opened in Herdr".to_string())
+}
+
+/// Reads `OPENCLAW_GATEWAY_URL`/`OPENCLAW_GATEWAY_TOKEN` from the same
+/// env file `openclaw-handoff` sources (`$OPENCLAW_NOVAD_ENV`, default
+/// `~/.config/openclaw-novad.env`) -- not duplicated into
+/// `config.toml`, since that would just be a second place for the
+/// same credential to drift out of sync.
+fn gateway_credentials() -> Option<(String, String)> {
+    let path = std::env::var_os("OPENCLAW_NOVAD_ENV")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            dirs::home_dir()
+                .unwrap_or_default()
+                .join(".config/openclaw-novad.env")
+        });
+    let content = std::fs::read_to_string(&path)
+        .inspect_err(|e| tracing::warn!("[router:openclaw] reading {path:?}: {e}"))
+        .ok()?;
+
+    let mut url = None;
+    let mut token = None;
+    for line in content.lines() {
+        let line = line.trim();
+        if let Some(v) = line.strip_prefix("OPENCLAW_GATEWAY_URL=") {
+            url = Some(v.trim_matches('"').to_string());
+        } else if let Some(v) = line.strip_prefix("OPENCLAW_GATEWAY_TOKEN=") {
+            token = Some(v.trim_matches('"').to_string());
+        }
+    }
+    Some((url?, token?))
+}
+
+/// Writes a small self-contained launch script (mode 700 -- it embeds
+/// the gateway token, same sensitivity as `openclaw-novad.env` itself)
+/// under `$XDG_RUNTIME_DIR/omarchy-novad/`, same convention
+/// `main.rs::transcript_path` already uses. A real file rather than an
+/// inline command string: `herdr pane run` re-lexes its trailing
+/// arguments at the target shell, which mangles quoting for anything
+/// containing its own `--flag value` pairs (found live).
+fn write_launch_script(url: &str, token: &str) -> Option<std::path::PathBuf> {
+    let dir = std::env::var_os("XDG_RUNTIME_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir)
+        .join("omarchy-novad");
+    std::fs::create_dir_all(&dir).ok()?;
+    let path = dir.join("openclaw-herdr.sh");
+
+    let script = format!(
+        "#!/usr/bin/env bash\nexec openclaw tui --session agent:main:novad:{CONVERSATION_ID} \
+         --url {url:?} --token {token:?}\n"
+    );
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(&path)
+        .ok()?;
+    file.write_all(script.as_bytes()).ok()?;
+    drop(file);
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700));
+    }
+
+    Some(path)
+}
+
+/// Creates a new Herdr tab and returns its root pane id, or `None` if
+/// `herdr` isn't running/reachable.
+fn open_herdr_tab() -> Option<String> {
+    let output = Command::new("herdr")
+        .args(["tab", "create", "--label", "OpenClaw", "--focus"])
+        .output()
+        .inspect_err(|e| tracing::warn!("[router:openclaw] failed to spawn herdr: {e}"))
+        .ok()?;
+    if !output.status.success() {
+        tracing::warn!(
+            "[router:openclaw] herdr tab create failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return None;
+    }
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).ok()?;
+    json["result"]["root_pane"]["pane_id"]
+        .as_str()
+        .map(str::to_string)
+}
+
+/// Runs `script_path` in `pane_id` -- fire-and-forget, same as a user
+/// typing the command and pressing Enter.
+fn run_in_pane(pane_id: &str, script_path: &std::path::Path) {
+    let status = Command::new("herdr")
+        .args(["pane", "run", pane_id])
+        .arg(script_path)
+        .status();
+    if let Err(e) = status {
+        tracing::warn!("[router:openclaw] herdr pane run failed: {e}");
+    }
+}
+
+/// Whether `pane_id`'s current terminal content contains `needle` --
+/// used to check for the device-approval prompt after a launch.
+fn pane_shows(pane_id: &str, needle: &str) -> bool {
+    match Command::new("herdr")
+        .args(["pane", "read", pane_id])
+        .output()
+    {
+        Ok(output) => String::from_utf8_lossy(&output.stdout).contains(needle),
+        Err(e) => {
+            tracing::warn!("[router:openclaw] herdr pane read failed: {e}");
+            false
+        }
     }
 }

@@ -160,6 +160,13 @@ enum Command {
         #[command(subcommand)]
         what: TelegramCommand,
     },
+
+    /// OpenClaw actions outside the automatic wake-word handoff (see
+    /// `router::openclaw`'s module docs).
+    Openclaw {
+        #[command(subcommand)]
+        what: OpenclawCommand,
+    },
 }
 
 #[derive(Subcommand)]
@@ -176,6 +183,16 @@ enum TelegramCommand {
     /// them -- same resolution/send path `Intent::Telegram` uses after
     /// the popup's Approve, just without the popup.
     Send { name: String, text: String },
+}
+
+#[derive(Subcommand)]
+enum OpenclawCommand {
+    /// Open `openclaw tui` in a new Herdr tab, attached to the same
+    /// gateway session the automatic wake-word handoff uses -- an
+    /// explicit "continue this conversation" action, deliberately
+    /// separate from that automatic handoff. See
+    /// `router::openclaw::continue_in_herdr`'s doc comment for why.
+    ContinueInHerdr,
 }
 
 #[derive(Subcommand)]
@@ -286,6 +303,9 @@ fn main() -> anyhow::Result<()> {
         Command::Telegram {
             what: TelegramCommand::Send { name, text },
         } => run_telegram_send(&name, &text, file_config.telegram),
+        Command::Openclaw {
+            what: OpenclawCommand::ContinueInHerdr,
+        } => run_openclaw_continue_in_herdr(file_config.openclaw),
     }
 }
 
@@ -326,6 +346,20 @@ fn run_telegram_send(
         anyhow::bail!("[telegram] is not configured in config.toml -- see README's setup section");
     };
     let (ok, message) = router::telegram_send(name, text, &cfg);
+    println!("{message}");
+    if ok {
+        Ok(())
+    } else {
+        std::process::exit(1);
+    }
+}
+
+/// Unlike Bluebubbles/Telegram's `send` commands, `[openclaw]` isn't
+/// required to be configured -- `approve_device_command` is an
+/// optional bootstrap aid (see `config::OpenClawConfig`'s doc comment),
+/// not a credential this action can't function without.
+fn run_openclaw_continue_in_herdr(openclaw: Option<config::OpenClawConfig>) -> anyhow::Result<()> {
+    let (ok, message) = router::openclaw_continue_in_herdr(openclaw.as_ref());
     println!("{message}");
     if ok {
         Ok(())

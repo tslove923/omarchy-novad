@@ -172,12 +172,16 @@ password = "..."
 # direct_target = false
 # direct_target_prefix = "pilot"
 # plugin_id = "io.github.spencerbull.omapilot"
+
+[openclaw]
+# approve_device_command = "ssh admin-host \"kubectl exec -n openclaw deploy/openclaw -- openclaw devices approve --latest\""
 ```
 
 See [Home Assistant setup](#home-assistant-setup),
-[BlueBubbles setup](#bluebubbles-setup), and
-[OmaPilot integration](#omapilot-integration) below for what each
-section actually needs.
+[BlueBubbles setup](#bluebubbles-setup),
+[OmaPilot integration](#omapilot-integration), and
+[OpenClaw setup](#openclaw-setup) below for what each section
+actually needs.
 
 ## Home Assistant setup
 
@@ -352,6 +356,46 @@ openclaw-handoff "reply with the single word PING and nothing else" "smoke-test"
 Then say the wake word and something open-ended ("what's the capital
 of France", "write a python script to sort a list") — the popup
 should show "Asking OpenClaw…" and come back with a real answer.
+
+### Continuing a conversation in Herdr
+
+`omarchy-novad openclaw continue-in-herdr` opens `openclaw tui` in a
+new Herdr tab, attached to the exact same session (`agent:main:novad:
+voice`) the automatic handoff above uses — so it picks up right where
+the last reply left off, full history included. Deliberately a
+separate, explicit action rather than part of the automatic handoff:
+`openclaw tui` is a persistent interactive session, and unlike the
+one-shot `openclaw agent --message` bridge, the gateway requires a
+one-time device-pairing approval before it'll connect at all — a
+hands-free wake-word trigger that can silently block on a human
+approving a device somewhere isn't hands-free anymore. This is a
+known, currently-unresolved upstream limitation for token-authenticated
+remote clients, not a local misconfiguration —
+[openclaw/openclaw#29908](https://github.com/openclaw/openclaw/issues/29908)
+tracks making token auth bypass pairing the way it arguably should;
+the one documented workaround
+([`gateway.controlUi.allowInsecureAuth`](https://github.com/openclaw/openclaw/issues/1679))
+is itself reported buggy for reverse-proxied deployments like this one.
+
+Once a device is approved, though, it stays paired for future
+launches from the same machine — this is a one-time bootstrap cost,
+not a per-session tax.
+
+```toml
+[openclaw]
+# Run once, after opening the Herdr session, only if the gateway
+# reports a pending device-pairing request. Fully your own command --
+# only you know what network path can actually reach your gateway's
+# admin surface (a k3s pod, a different host, local loopback on the
+# gateway machine itself). Omit entirely to just leave pairing for you
+# to approve by hand when it comes up.
+approve_device_command = "ssh admin-host \"kubectl exec -n openclaw deploy/openclaw -- openclaw devices approve --latest\""
+```
+
+`--latest` only *previews* a pending request and prints the exact
+`openclaw devices approve <id>` command to actually approve it — if
+your gateway needs the two-step dance rather than one-shot approval,
+write that into `approve_device_command` instead.
 
 ## OmaPilot integration
 

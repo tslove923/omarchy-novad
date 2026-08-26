@@ -341,3 +341,11 @@ pub fn telegram_send(name: &str, text: &str, cfg: &TelegramConfig) -> (bool, Str
 pub fn bluebubbles_send(name: &str, text: &str, cfg: &BlueBubblesConfig) -> (bool, String) {
     bluebubbles::run_confirmed(&format!("text {name} saying {text}"), None, cfg)
 }
+
+/// `omarchy-novad openclaw continue-in-herdr` (see main.rs) -- see
+/// `openclaw::continue_in_herdr`'s doc comment for why this is a
+/// separate, explicit action rather than part of the automatic
+/// wake-word handoff.
+pub fn openclaw_continue_in_herdr(cfg: Option<&crate::config::OpenClawConfig>) -> (bool, String) {
+    openclaw::continue_in_herdr(cfg)
+}

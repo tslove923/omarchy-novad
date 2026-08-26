@@ -37,6 +37,8 @@ pub struct Config {
     pub spotify: Option<SpotifyConfig>,
     #[serde(default)]
     pub omapilot: Option<OmaPilotConfig>,
+    #[serde(default)]
+    pub openclaw: Option<OpenClawConfig>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -261,6 +263,35 @@ fn default_direct_target_prefix() -> String {
 
 fn default_omapilot_plugin_id() -> String {
     "io.github.spencerbull.omapilot".to_string()
+}
+
+/// OpenClaw's own gateway credentials (`~/.config/openclaw-novad.env`,
+/// same file `openclaw-handoff` already sources) aren't duplicated
+/// here -- this section is only for the one thing that's genuinely
+/// novad-specific: how *this machine* gets a fresh `openclaw tui`
+/// session past the gateway's device-pairing requirement. See
+/// `router::openclaw::continue_in_herdr`'s module docs for why that's
+/// even necessary.
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct OpenClawConfig {
+    /// Run once, after opening an interactive Herdr session, if the
+    /// gateway reports a pending device-pairing request -- e.g. `ssh
+    /// archpocket "kubectl exec -n openclaw deploy/openclaw -- openclaw
+    /// devices approve --latest"`, if that's where your gateway
+    /// actually runs. Fully user-authored on purpose: only you know
+    /// what network path can reach your gateway's admin surface (a
+    /// k3s pod, a different host, a local loopback -- see
+    /// `router::openclaw`'s module docs for why the credentials this
+    /// server ships with can't do this themselves). `None` (the
+    /// default) means never attempt it -- device pairing, if needed,
+    /// is left for you to approve by hand.
+    ///
+    /// Only needed once in practice: once a device is approved it
+    /// stays paired for future sessions from the same machine, so this
+    /// is a bootstrap/recovery aid, not something that runs on every
+    /// launch.
+    #[serde(default)]
+    pub approve_device_command: Option<String>,
 }
 
 /// `~/.config/omarchy-novad/config.toml`.

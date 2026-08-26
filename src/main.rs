@@ -91,6 +91,18 @@ enum Command {
         /// than left inline with the answer.
         #[arg(long)]
         show_thinking: bool,
+        /// `llm` (default): `openvino_genai::LlmPipeline` + `ChatHistory`,
+        /// the original text-only path. `vlm`: `VlmPipeline` for a
+        /// vision-language model -- see `serve::vlm`'s module docs for
+        /// why this is a genuinely different code path, not just a
+        /// bigger model behind the same one. Run a second `serve`
+        /// process on a different `--port` for vlm rather than trying
+        /// to multiplex both kinds behind one port -- OmaPilot's
+        /// `models.json` already supports multiple providers with
+        /// different `baseUrl`s, so there's no need to route between
+        /// them inside this process.
+        #[arg(long, value_enum, default_value_t = serve::PipelineKind::Llm)]
+        kind: serve::PipelineKind,
     },
 
     /// One-time setup tasks.
@@ -233,6 +245,7 @@ fn main() -> anyhow::Result<()> {
             model_id,
             port,
             show_thinking,
+            kind,
         } => {
             let s = &file_config.serve;
             let device = config::resolve_str(device, "GPU", &s.device);
@@ -250,6 +263,7 @@ fn main() -> anyhow::Result<()> {
                 model_id,
                 port,
                 show_thinking,
+                kind,
             };
             tokio::runtime::Runtime::new()?.block_on(serve::run(config))
         }

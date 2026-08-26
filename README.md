@@ -414,6 +414,51 @@ omarchy-shell io.github.spencerbull.omapilot askText "In one sentence, what's th
 If it prints `Function not found`, the `askText` patch isn't applied
 in the running plugin checkout — see above.
 
+## Serving a vision-language model (`--kind vlm`)
+
+`omarchy-novad serve --kind vlm` serves a VLM (e.g. Qwen3.8-27B) over
+the same OpenAI-compatible `/v1/chat/completions` API the default
+`--kind llm` path does, tool calling included — but it's a genuinely
+different code path internally, not just a bigger model:
+
+- **Requires a newer OpenVINO GenAI runtime than the LLM path.**
+  `openvino_genai::VlmPipeline` needs a recent build — install it
+  side-by-side with whatever version `--kind llm` uses (don't replace
+  it), e.g. `~/.local/share/openvino-genai-sdk/2026.4.0.0.dev<date>/`,
+  and point `LD_LIBRARY_PATH` at that version's `runtime/lib/intel64`
+  when running `--kind vlm`.
+- **Renders `chat_template.jinja` itself**, via `minijinja` (see
+  `src/serve/vlm.rs`'s module docs) — `VlmPipeline::generate` takes a
+  flat prompt string, not a `ChatHistory`, and the Rust bindings expose
+  no way to apply a model's chat template to it the way the LLM path's
+  `ChatHistory` does internally. The model directory must ship its own
+  `chat_template.jinja` (every OpenVINO IR checkout does).
+- **`enable_thinking` in the prompt is not reliable.** Found live: even
+  with `enable_thinking=false` rendered into the prompt (the model's
+  own convention for suppressing reasoning), qwen3.8-27b reasoned
+  anyway. `format_vlm_thinking` handles this by checking the *output*
+  for a `</think>` marker rather than trusting the prompt-level flag —
+  same underlying "some variants don't honor the directive" reality
+  the LLM path's `NO_THINK_SUFFIX` doc comment already describes, via
+  a different mechanism.
+- **No real image input yet.** The rendered prompt includes the
+  template's `<|vision_start|><|image_pad|><|vision_end|>` placeholder
+  tokens for any image/video content part, but every request today
+  generates with an empty `images` array — text-only. Wiring up real
+  `ov_tensor_t` image tensors (decode + resize/normalize per the
+  model's own `preprocessor_config.json`) is a follow-up.
+- **Memory is tight.** A 15GB INT4 model briefly spiked swap to ~21GB
+  during load on this machine (30GB RAM) before settling around 10GB
+  at steady state — expect a rough couple of minutes on first load,
+  and don't run it alongside another large model without headroom to
+  spare.
+
+```bash
+LD_LIBRARY_PATH=~/.local/share/openvino-genai-sdk/2026.4.0.0.dev20260825/runtime/lib/intel64 \
+  omarchy-novad serve --model ~/.local/share/omarchy-novad/llm-models/qwen3.8-27b \
+  --device GPU --model-id qwen3.8-27b --port 8420 --kind vlm
+```
+
 ## Known classifier gaps
 
 The intent classifier (a small local model, see [Setup](#setup)) is

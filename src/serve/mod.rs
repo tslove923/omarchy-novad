@@ -37,6 +37,8 @@
 //! `parse_tool_calls` below parses exactly that. A different model
 //! would need a different parser — this is not a generic solution.
 
+mod vlm;
+
 use std::convert::Infallible;
 use std::sync::Mutex;
 
@@ -49,7 +51,7 @@ use axum::routing::{get, post};
 use axum::Router;
 use futures_util::stream::{self, Stream, StreamExt};
 use openvino_genai::{
-    ChatHistory, ChatMessage, GenerationConfig, JsonContainer, LlmPipeline, ToolCall,
+    ChatHistory, ChatMessage, GenerationConfig, JsonContainer, LlmPipeline, ToolCall, VlmPipeline,
 };
 use serde::{Deserialize, Serialize};
 use tokio_stream::wrappers::UnboundedReceiverStream;
@@ -70,10 +72,32 @@ pub struct ServeConfig {
     pub port: u16,
     /// See `crate::config::ServeConfig::show_thinking`'s doc comment.
     pub show_thinking: bool,
+    pub kind: PipelineKind,
+}
+
+/// See `Command::Serve`'s `--kind` doc comment in main.rs for why this
+/// is a separate `serve` process per kind rather than one process
+/// multiplexing both.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum PipelineKind {
+    Llm,
+    Vlm,
+}
+
+/// Either backend behind `/v1/chat/completions` -- see `vlm`'s module
+/// docs for why `Vlm` needs its own prompt-rendering path
+/// (`chat_template_source`) instead of reusing `ChatHistory` the way
+/// `Llm` does.
+enum Pipeline {
+    Llm(Mutex<LlmPipeline>),
+    Vlm {
+        pipeline: Mutex<VlmPipeline>,
+        chat_template_source: String,
+    },
 }
 
 struct AppState {
-    pipeline: Mutex<LlmPipeline>,
+    pipeline: Pipeline,
     model_id: String,
     show_thinking: bool,
 }
@@ -88,18 +112,52 @@ pub async fn run(config: ServeConfig) -> anyhow::Result<()> {
     std::fs::create_dir_all(&config.cache_dir)?;
     let cache_dir_str = config.cache_dir.to_string_lossy().to_string();
 
-    tracing::info!("Loading {} on {}...", model_path, config.device);
+    tracing::info!(
+        "Loading {} ({:?}) on {}...",
+        model_path,
+        config.kind,
+        config.device
+    );
     let load_start = std::time::Instant::now();
-    let pipeline = LlmPipeline::with_properties(
-        &model_path,
-        &config.device,
-        &[("CACHE_DIR", &cache_dir_str)],
-    )
-    .map_err(|e| ServeError::Init(format!("LlmPipeline::with_properties: {e}")))?;
+    let pipeline = match config.kind {
+        PipelineKind::Llm => {
+            let pipeline = LlmPipeline::with_properties(
+                &model_path,
+                &config.device,
+                &[("CACHE_DIR", &cache_dir_str)],
+            )
+            .map_err(|e| ServeError::Init(format!("LlmPipeline::with_properties: {e}")))?;
+            Pipeline::Llm(Mutex::new(pipeline))
+        }
+        PipelineKind::Vlm => {
+            let chat_template_source = std::fs::read_to_string(
+                config.model_path.join("chat_template.jinja"),
+            )
+            .map_err(|e| {
+                ServeError::Init(format!(
+                    "reading {:?}/chat_template.jinja: {e} -- a VLM model directory \
+                             must ship its own chat_template.jinja (see vlm.rs's module docs \
+                             for why this server renders it itself rather than relying on \
+                             ChatHistory)",
+                    config.model_path
+                ))
+            })?;
+            let pipeline = VlmPipeline::with_properties(
+                &model_path,
+                &config.device,
+                &[("CACHE_DIR", &cache_dir_str)],
+            )
+            .map_err(|e| ServeError::Init(format!("VlmPipeline::with_properties: {e}")))?;
+            Pipeline::Vlm {
+                pipeline: Mutex::new(pipeline),
+                chat_template_source,
+            }
+        }
+    };
     tracing::info!("Model loaded in {:.2}s", load_start.elapsed().as_secs_f32());
 
     let state = std::sync::Arc::new(AppState {
-        pipeline: Mutex::new(pipeline),
+        pipeline,
         model_id: config.model_id.clone(),
         show_thinking: config.show_thinking,
     });
@@ -527,14 +585,54 @@ fn format_thinking(content: &str, show_thinking: bool) -> String {
     )
 }
 
+/// `format_thinking`, adapted for `vlm::render_prompt`'s output: unlike
+/// the LLM path (`ChatHistory` handles the whole `<|im_start|>assistant`
+/// turn internally), the VLM prompt this server renders itself already
+/// puts `<think>\n` (or its pre-closed empty form) at the very end --
+/// part of what was *sent*, not something the model generates. So the
+/// model's raw continuation, if it reasons at all, starts *inside* an
+/// already-open think block and never has a leading `<think>` tag of
+/// its own -- `format_thinking`'s prefix check would never match,
+/// silently leaking the reasoning and a bare `</think>` as if they
+/// were the answer (found live).
+///
+/// Whether to reconstruct the missing opening tag is decided by
+/// whether the *output* contains a `</think>` at all, not by what
+/// `enable_thinking` was rendered into the prompt -- found live that
+/// qwen3.8-27b reasons regardless of a pre-closed empty think block in
+/// the prompt, the same "some variants don't honor the directive"
+/// reality `NO_THINK_SUFFIX`'s own doc comment already describes for
+/// the LLM path, just via a different mechanism (a prompt variable
+/// instead of a suffix hint) hitting the same kind of unreliability.
+fn format_vlm_thinking(content: &str, show_thinking: bool) -> String {
+    if content.contains("</think>") {
+        format_thinking(&format!("<think>\n{content}"), show_thinking)
+    } else {
+        content.to_string()
+    }
+}
+
 fn run_generation_core(
     state: &AppState,
     req: &ChatCompletionRequest,
 ) -> Result<GenerationResult, ServeError> {
-    let (history, gen_config) = build_history_and_config(req, state.show_thinking)?;
+    match &state.pipeline {
+        Pipeline::Llm(pipeline) => run_llm_generation(pipeline, req, state.show_thinking),
+        Pipeline::Vlm {
+            pipeline,
+            chat_template_source,
+        } => run_vlm_generation(pipeline, chat_template_source, req, state.show_thinking),
+    }
+}
 
-    let mut pipeline = state
-        .pipeline
+fn run_llm_generation(
+    pipeline: &Mutex<LlmPipeline>,
+    req: &ChatCompletionRequest,
+    show_thinking: bool,
+) -> Result<GenerationResult, ServeError> {
+    let (history, gen_config) = build_history_and_config(req, show_thinking)?;
+
+    let mut pipeline = pipeline
         .lock()
         .map_err(|_| ServeError::Infer("pipeline lock poisoned".to_string()))?;
     let results = pipeline
@@ -545,7 +643,41 @@ fn run_generation_core(
         .map_err(|e| ServeError::Infer(format!("get_string: {e}")))?;
     // Belt-and-suspenders with the NO_THINK_SUFFIX directive above --
     // some quantized/converted variants don't honor it reliably.
-    let text = format_thinking(&text, state.show_thinking);
+    let text = format_thinking(&text, show_thinking);
+    let (prompt_tokens, completion_tokens) = results
+        .get_perf_metrics()
+        .and_then(|m| Ok((m.get_num_input_tokens()?, m.get_num_generation_tokens()?)))
+        .unwrap_or((0, 0));
+
+    Ok(GenerationResult {
+        text,
+        prompt_tokens,
+        completion_tokens,
+    })
+}
+
+/// See `vlm`'s module docs. No `images` yet (see there for why) --
+/// `VlmPipeline::generate` still takes the parameter, always empty
+/// here for now.
+fn run_vlm_generation(
+    pipeline: &Mutex<VlmPipeline>,
+    chat_template_source: &str,
+    req: &ChatCompletionRequest,
+    show_thinking: bool,
+) -> Result<GenerationResult, ServeError> {
+    let prompt = vlm::render_prompt(chat_template_source, req, show_thinking)?;
+    let gen_config = build_generation_config(req)?;
+
+    let mut pipeline = pipeline
+        .lock()
+        .map_err(|_| ServeError::Infer("pipeline lock poisoned".to_string()))?;
+    let results = pipeline
+        .generate(&prompt, &[], Some(&gen_config), None)
+        .map_err(|e| ServeError::Infer(format!("VlmPipeline::generate: {e}")))?;
+    let text = results
+        .get_string()
+        .map_err(|e| ServeError::Infer(format!("get_string: {e}")))?;
+    let text = format_vlm_thinking(&text, show_thinking);
     let (prompt_tokens, completion_tokens) = results
         .get_perf_metrics()
         .and_then(|m| Ok((m.get_num_input_tokens()?, m.get_num_generation_tokens()?)))
@@ -707,6 +839,15 @@ fn build_history_and_config(
             .map_err(|e| ServeError::Infer(format!("ChatHistory::set_tools: {e}")))?;
     }
 
+    let gen_config = build_generation_config(req)?;
+
+    Ok((history, gen_config))
+}
+
+/// Sampling params, shared by both pipeline kinds -- unlike
+/// `ChatHistory`/prompt rendering, `GenerationConfig` doesn't care
+/// which pipeline it's handed to.
+fn build_generation_config(req: &ChatCompletionRequest) -> Result<GenerationConfig, ServeError> {
     let mut gen_config = GenerationConfig::new()
         .map_err(|e| ServeError::Infer(format!("GenerationConfig::new: {e}")))?;
     gen_config
@@ -725,8 +866,7 @@ fn build_history_and_config(
             .set_top_p(p)
             .map_err(|e| ServeError::Infer(format!("set_top_p: {e}")))?;
     }
-
-    Ok((history, gen_config))
+    Ok(gen_config)
 }
 
 fn run_generation(
@@ -823,6 +963,40 @@ mod thinking_tests {
     fn unterminated_block_passes_through_when_shown() {
         let truncated = "<think>\nstill reasoning, got cut off";
         assert_eq!(format_thinking(truncated, true), truncated);
+    }
+
+    // format_vlm_thinking: the VLM prompt this server renders itself
+    // already puts the opening `<think>` tag at the end of what's
+    // *sent*, so the model's raw output (what these fixtures simulate)
+    // never has one -- unlike RAW above, which is shaped like an LLM
+    // response. Reproduces a real bug found live: without reconstructing
+    // the opening tag, a plain `strip_prefix("<think>")` check never
+    // matched, leaking the reasoning and a bare `</think>` as the answer.
+    const VLM_RAW_WITH_THINKING: &str = "Okay, the user wants...\n</think>\n\nParis.";
+
+    #[test]
+    fn vlm_strips_reconstructed_block_when_show_thinking_is_off() {
+        // The exact live bug: enable_thinking=false rendered into the
+        // prompt did NOT stop qwen3.8-27b from reasoning anyway. Since
+        // the output contains </think>, it must still be reconstructed
+        // and stripped even though show_thinking is off.
+        assert_eq!(format_vlm_thinking(VLM_RAW_WITH_THINKING, false), "Paris.");
+    }
+
+    #[test]
+    fn vlm_folds_reconstructed_block_when_show_thinking_is_on() {
+        assert_eq!(
+            format_vlm_thinking(VLM_RAW_WITH_THINKING, true),
+            "<details>\n<summary>💭 Thinking</summary>\n\nOkay, the user wants...\n\n</details>\n\nParis."
+        );
+    }
+
+    #[test]
+    fn vlm_no_think_marker_at_all_passes_through_unchanged() {
+        // No </think> anywhere -- nothing to reconstruct, regardless
+        // of show_thinking. Model genuinely didn't reason this turn.
+        assert_eq!(format_vlm_thinking("Paris.", false), "Paris.");
+        assert_eq!(format_vlm_thinking("Paris.", true), "Paris.");
     }
 }
 

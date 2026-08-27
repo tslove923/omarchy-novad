@@ -234,6 +234,16 @@ pub fn run_session(cfg: &PipelineConfig) {
              looks like a device-control command): {transcript:?}"
         );
         (Intent::HomeAssistant, transcript.clone())
+    } else if result.intent == Intent::MemoryReturn {
+        // MEMORY_RETURN has no local handler -- there's no recall/notes
+        // feature backing it, so it always fell through to
+        // RouteResult::Unhandled's silent 4s transcript flash regardless
+        // of what recovery checks above matched. Rather than a dead-end
+        // intent, treat every MEMORY_RETURN as a request for OpenClaw:
+        // it's a strictly better fallback than a no-op flash, and the
+        // recovery checks above already skim off the cases that clearly
+        // belong to a *different* local handler first.
+        (Intent::External, transcript.clone())
     } else {
         (result.intent, result.argument.clone())
     };

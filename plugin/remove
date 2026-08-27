@@ -23,6 +23,15 @@ done
 
 systemctl --user daemon-reload
 
+# Only remove the ~/.local/bin symlink ./setup itself created -- never
+# a real file or a symlink pointing somewhere else (that'd mean either
+# this wasn't ours to begin with, or the user repointed it themselves).
+LOCAL_BIN_LINK="$HOME/.local/bin/omarchy-novad"
+if [[ -L "$LOCAL_BIN_LINK" ]]; then
+  rm -f "$LOCAL_BIN_LINK"
+  echo "Removed $LOCAL_BIN_LINK."
+fi
+
 info "\nDone. The omarchy-novad binary, its models, and ~/.config/omarchy-novad/config.toml
 were left in place in case you reinstall this plugin later."
 echo

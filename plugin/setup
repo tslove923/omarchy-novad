@@ -44,7 +44,37 @@ in your omarchy-novad checkout, see that project's README), then either put it o
 PATH or rerun with:
   OMARCHY_NOVAD_BIN=/path/to/omarchy-novad $root/setup"
 fi
+NOVAD_BIN=$(readlink -f "$NOVAD_BIN")
 info "Found omarchy-novad binary: $NOVAD_BIN"
+
+# ── 1b. Make it resolve as a bare command for the *graphical shell*  ─
+#
+# systemd doesn't need this (the units below get NOVAD_BIN's full
+# path baked in directly) -- this is specifically for
+# Service.qml/BarWidget.qml/Overlay.qml's `Quickshell.Io.Process`
+# calls (`omarchy-novad respond ...`, `omarchy-novad converse ...`),
+# which invoke the bare command name and rely on whatever PATH the
+# long-running `omarchy-shell` process itself has. Confirmed live: an
+# interactive login shell's PATH (even with the main README's
+# `~/Work/omarchy-novad/bin` symlink already in it) does NOT
+# necessarily reach that process -- Hyprland/uwsm graphical sessions
+# build their own environment separately from `.bashrc`/`.zshrc`, so a
+# PATH addition that only an interactive shell's rc file makes is
+# invisible to it. `~/.local/bin` reliably *is* on the graphical
+# session's PATH on this kind of setup (confirmed by checking the live
+# shell process's own /proc/<pid>/environ), so that's the symlink
+# target here regardless of where NOVAD_BIN itself came from.
+LOCAL_BIN="$HOME/.local/bin"
+mkdir -p "$LOCAL_BIN"
+if [[ -L "$LOCAL_BIN/omarchy-novad" || ! -e "$LOCAL_BIN/omarchy-novad" ]]; then
+  ln -sf "$NOVAD_BIN" "$LOCAL_BIN/omarchy-novad"
+  info "Linked $LOCAL_BIN/omarchy-novad -> $NOVAD_BIN (so the plugin's UI buttons can find it)."
+elif [[ "$(readlink -f "$LOCAL_BIN/omarchy-novad")" != "$NOVAD_BIN" ]]; then
+  warn "\n$LOCAL_BIN/omarchy-novad already exists and isn't a symlink this script manages
+(it's a real file, or a symlink pointing somewhere else) -- leaving it alone. If the
+plugin's Approve/Deny/Stop/Confirm buttons don't work, point it at $NOVAD_BIN yourself
+or move it aside and rerun this script."
+fi
 
 # ── 2. Locate an OpenVINO GenAI SDK runtime for `serve` ─────────────
 #

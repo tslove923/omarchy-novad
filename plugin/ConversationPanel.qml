@@ -3,31 +3,37 @@
 // quickshell/OpenClawConversation.qml onto the Omarchy shell plugin
 // host contract.
 //
-// Same layer-shell + visibility-toggle pattern as PopupCard.qml (a
-// full-anchored PanelWindow, nested here as a plain child item inside
-// Overlay.qml's host-injected `Item` root, that's only actually
-// visible -- and only then receiving input -- while there's a
-// conversation in progress, via a `mask` restricted to the panel's own
-// rect, so it never intercepts clicks anywhere else on screen). This
-// coexists with PopupCard rather than replacing it: PopupCard is
+// Same layer-shell pattern as PopupCard.qml (a full-anchored
+// PanelWindow, nested here as a plain child item inside Overlay.qml's
+// host-injected `Item` root, with a `mask` restricted to the panel's
+// own rect so it never intercepts clicks anywhere else on screen).
+// This coexists with PopupCard rather than replacing it: PopupCard is
 // nova's short-lived per-utterance confirm/review card (centered, near
 // the top); this is the longer-lived multi-turn OpenClaw conversation
 // log (docked to the right edge, tall). See this plugin's README for
 // why both live under one `overlay` entry point instead of two.
 //
+// Unlike PopupCard, this window is *always* visible -- it's a permanent
+// docked chat window, not a transient card. The chat box at the bottom
+// is always present (typing into it starts a conversation when none is
+// running, or sends a new message mid-conversation -- see
+// service.sendText()), and OpenClaw's reply streams into the transcript
+// area live as it's produced (see Service.conversationStreamingText),
+// so output appears as the model writes it rather than all at once when
+// the turn completes.
+//
 // State comes from `service` (Overlay.qml's injected Service.qml
 // instance) instead of a local ConversationState file-watcher -- the
 // daemon <-> UI JSON-file contract is unchanged, Service.qml now owns
-// the one FileView that reads it. The one action available here
-// ("Stop") goes back out via `service.stopConversation()`, which runs
-// `omarchy-novad converse stop` the same way this file used to run it
-// directly.
+// the one FileView that reads it. Actions go back out via
+// `service.stopConversation()`, `service.confirmPending()`, etc.,
+// which run `omarchy-novad converse <action>` the same way this file
+// used to run them directly.
 
 import QtQuick
 import QtQuick.Controls
 import Quickshell
 import Quickshell.Wayland
-import Quickshell.Io
 
 PanelWindow {
     id: root
@@ -40,8 +46,12 @@ PanelWindow {
     readonly property string pendingText: root.service ? root.service.conversationPendingText : ""
     readonly property var turns: root.service ? root.service.conversationTurns : []
     readonly property int thinkingElapsedSecs: root.service ? root.service.conversationThinkingElapsedSecs : -1
+    readonly property string streamingText: root.service ? root.service.conversationStreamingText : ""
 
-    visible: active
+    // Always visible -- this is a permanent docked chat window, not a
+    // transient card. The empty state (no conversation running) shows
+    // the idle status + the always-present chat box.
+    visible: true
 
     anchors { top: true; bottom: true; left: true; right: true }
     color: "transparent"
@@ -49,13 +59,10 @@ PanelWindow {
 
     WlrLayershell.namespace: "omarchy-novad-conversation"
     WlrLayershell.layer: WlrLayer.Overlay
-    // Same reasoning as PopupCard: no keyboard focus most of the time
-    // (mouse clicks + wheel/drag scrolling only) -- the one exception
-    // is the pending-transcript edit box below, exactly PopupCard's own
-    // editBoxVisible exception.
-    WlrLayershell.keyboardFocus: phase === "confirming"
-        ? WlrKeyboardFocus.OnDemand
-        : WlrKeyboardFocus.None
+    // Always OnDemand so the always-present chat box can be focused --
+    // the panel is a permanent input surface now, not a transient card
+    // that only needs keyboard focus while confirming.
+    WlrLayershell.keyboardFocus: WlrKeyboardFocus.OnDemand
 
     // Restrict the actually-interactive input region to the panel
     // itself -- the full-screen anchors above exist only so the panel
@@ -83,7 +90,7 @@ PanelWindow {
         case "confirming": return OmarchyTheme.yellow;
         case "thinking": return OmarchyTheme.magenta;
         case "speaking": return OmarchyTheme.green;
-        default: return root.mutedColor; // "" -- idle, waiting for Record
+        default: return root.mutedColor; // "" -- idle
         }
     }
 
@@ -94,7 +101,7 @@ PanelWindow {
         case "thinking": return root.thinkingElapsedSecs >= 0
             ? "Thinking… (" + root.thinkingElapsedSecs + "s)" : "Thinking…";
         case "speaking": return "Speaking…";
-        default: return active ? "Ready" : "";
+        default: return active ? "Ready" : "Idle";
         }
     }
 
@@ -130,6 +137,16 @@ PanelWindow {
     // voxtype's own silence-timeout.
     function stopListeningNow() {
         if (root.service) root.service.stopListening();
+    }
+
+    // Sends the chat box's current text as a new turn's utterance --
+    // trims it, ignores empty sends, clears the box. See
+    // service.sendText() for the active-vs-start routing.
+    function sendChatText(text) {
+        const t = (text || "").trim();
+        if (t.length === 0) return;
+        if (root.service) root.service.sendText(t);
+        chatField.text = "";
     }
 
     Rectangle {
@@ -204,10 +221,11 @@ PanelWindow {
         }
 
         // ── Bottom bar: live phase indicator + pending-transcript
-        //    confirmation, pinned to the bottom of the window like a
-        //    chat app's compose bar. History scrolls in the space
-        //    above it (turnsList below), most-recent turn nearest this
-        //    bar -- normal chat-box layout, not read-then-compose. ──
+        //    confirmation + the always-present chat box, pinned to the
+        //    bottom of the window like a chat app's compose bar.
+        //    History streams in the space above it (turnsList below),
+        //    most-recent turn nearest this bar -- normal chat-box
+        //    layout, not read-then-compose. ──
         Column {
             id: bottomBar
             anchors.left: parent.left
@@ -217,14 +235,13 @@ PanelWindow {
             spacing: 8
 
             // ── Live phase indicator -- pulsing dot + label, same
-            //    animation style as PopupCard's status bar. Hidden
-            //    entirely when phase is absent/idle-within-conversation
-            //    (see Service.conversationPhase's docs). ──
+            //    animation style as PopupCard's status bar. Always
+            //    visible now (the panel is a permanent window); the dot
+            //    only pulses while a phase is actually active. ──
             Row {
                 id: statusRow
-                height: visible ? 18 : 0
+                height: 18
                 spacing: 8
-                visible: root.phase.length > 0
 
                 Rectangle {
                     width: 8; height: 8; radius: 4
@@ -232,7 +249,7 @@ PanelWindow {
                     anchors.verticalCenter: parent.verticalCenter
 
                     SequentialAnimation on opacity {
-                        running: statusRow.visible
+                        running: root.phase.length > 0
                         loops: Animation.Infinite
                         NumberAnimation { to: 0.4; duration: 600 }
                         NumberAnimation { to: 1.0; duration: 600 }
@@ -294,7 +311,7 @@ PanelWindow {
                     TextEdit {
                         id: pendingField
                         width: parent.width
-                        text: root.pendingText
+                        text: ""
                         color: root.textColor
                         font.family: "JetBrains Mono"
                         font.pixelSize: 13
@@ -302,25 +319,43 @@ PanelWindow {
                         selectByMouse: true
                         focus: root.confirmBoxVisible
 
-                        // A fresh pendingText from the daemon (a new
-                        // transcript, or a voice re-statement replacing
-                        // an unclear reply -- see converse.rs's
-                        // confirm-round loop) should overwrite
-                        // whatever's here, but only when this box
-                        // wasn't already mid-edit by the user.
+                        // The daemon's pending transcript is synced into
+                        // this box explicitly (no `text:` binding) so a
+                        // fresh transcript -- a new one, or a voice
+                        // re-statement replacing an unclear reply, see
+                        // converse.rs's confirm-round loop -- overwrites
+                        // whatever's here, but only when the user isn't
+                        // mid-edit. Found live: the old `text:
+                        // root.pendingText` binding + onVisibleChanged
+                        // assignment raced the daemon's state write --
+                        // onVisibleChanged broke the binding while
+                        // root.pendingText was still stale (""), and the
+                        // Connections handler read the panel's not-yet-
+                        // re-evaluated pendingText binding, so the box
+                        // stayed blank even though the daemon's
+                        // pending_text was correct.
                         property string lastSyncedText: ""
-                        onVisibleChanged: if (visible) {
-                            text = root.pendingText;
-                            lastSyncedText = root.pendingText;
+                        property bool userEdited: false
+
+                        onTextChanged: {
+                            if (text !== lastSyncedText) userEdited = true;
                         }
+
+                        function syncFromDaemon() {
+                            const t = root.service ? root.service.conversationPendingText : "";
+                            pendingField.lastSyncedText = t;
+                            pendingField.text = t;
+                            pendingField.userEdited = false;
+                        }
+
+                        Component.onCompleted: syncFromDaemon()
+                        onVisibleChanged: if (visible) syncFromDaemon()
+
                         Connections {
                             target: root.service
                             enabled: root.service !== null
                             function onConversationPendingTextChanged() {
-                                if (pendingField.text === pendingField.lastSyncedText) {
-                                    pendingField.text = root.pendingText;
-                                    pendingField.lastSyncedText = root.pendingText;
-                                }
+                                if (!pendingField.userEdited) pendingField.syncFromDaemon();
                             }
                         }
 
@@ -359,6 +394,93 @@ PanelWindow {
                     }
                 }
             }
+
+            // ── Always-present chat box -- the compose bar. Typing a
+            //    message here starts a conversation when none is
+            //    running (service.sendText routes to `converse start
+            //    --text`) or sends a new turn's message mid-
+            //    conversation (`converse send-text`). Enter sends,
+            //    Shift+Enter inserts a newline. Grows with content up
+            //    to a cap, then scrolls internally. ──
+            Rectangle {
+                id: chatBox
+                width: parent.width
+                height: Math.min(Math.max(chatField.implicitHeight + 20, 40), 120)
+                radius: 8
+                color: Qt.darker(root.bgColor, 1.15)
+                border.width: 1
+                border.color: chatField.activeFocus ? root.accent : root.divider
+
+                Behavior on border.color {
+                    ColorAnimation { duration: 120 }
+                }
+
+                Row {
+                    anchors.fill: parent
+                    anchors.margins: 8
+                    spacing: 8
+
+                    Flickable {
+                        id: chatFlickable
+                        width: parent.width - sendButton.width - parent.spacing
+                        height: parent.height
+                        contentWidth: width
+                        contentHeight: Math.max(chatField.implicitHeight, height)
+                        clip: true
+                        boundsBehavior: Flickable.StopAtBounds
+
+                        TextEdit {
+                            id: chatField
+                            width: parent.width
+                            height: Math.max(chatFlickable.height, implicitHeight)
+                            text: ""
+                            color: root.textColor
+                            font.family: "JetBrains Mono"
+                            font.pixelSize: 13
+                            wrapMode: TextEdit.Wrap
+                            selectByMouse: true
+
+                            // Placeholder hint -- shown only while empty
+                            // and unfocused, so it never blocks a click
+                            // into the box itself.
+                            Text {
+                                anchors.fill: parent
+                                text: root.active ? "Type a message…" : "Type a message to start…"
+                                color: root.mutedColor
+                                font.family: "JetBrains Mono"
+                                font.pixelSize: 13
+                                verticalAlignment: Text.AlignVCenter
+                                wrapMode: Text.Wrap
+                                visible: parent.text.length === 0 && !parent.activeFocus
+                            }
+
+                            // Enter sends -- Shift+Enter still inserts a
+                            // newline for multi-line messages.
+                            Keys.onReturnPressed: (event) => {
+                                if (event.modifiers & Qt.ShiftModifier) {
+                                    event.accepted = false;
+                                } else {
+                                    root.sendChatText(chatField.text);
+                                    event.accepted = true;
+                                }
+                            }
+                            Keys.onEnterPressed: (event) => {
+                                root.sendChatText(chatField.text);
+                                event.accepted = true;
+                            }
+                        }
+                    }
+
+                    PopupButton {
+                        id: sendButton
+                        width: 60
+                        height: parent.height
+                        label: "Send"
+                        tint: root.accent
+                        onClicked: root.sendChatText(chatField.text)
+                    }
+                }
+            }
         }
 
         // ── Scrolling transcript -- oldest turn at top, newest at the
@@ -379,6 +501,7 @@ PanelWindow {
             spacing: 14
             model: root.turns
             delegate: turnDelegate
+            footer: root.streamingText.length > 0 ? streamingFooter : null
 
             ScrollBar.vertical: ScrollBar {
                 policy: ScrollBar.AsNeeded
@@ -396,6 +519,17 @@ PanelWindow {
             // tick" trick as the card's Behavior-driven resizes.
             onCountChanged: Qt.callLater(turnsList.positionViewAtEnd)
             Component.onCompleted: Qt.callLater(turnsList.positionViewAtEnd)
+
+            // The streamed reply grows as deltas arrive -- keep the
+            // newest text in view. (A Connections block rather than an
+            // `onStreamingTextChanged` handler, which would only fire
+            // for a signal on the ListView itself.)
+            Connections {
+                target: root
+                function onStreamingTextChanged() {
+                    Qt.callLater(turnsList.positionViewAtEnd);
+                }
+            }
         }
 
         Text {
@@ -403,7 +537,38 @@ PanelWindow {
             text: "Waiting for the first turn…"
             color: root.mutedColor
             font.pixelSize: 13
-            visible: turnsList.count === 0
+            visible: turnsList.count === 0 && root.streamingText.length === 0
+        }
+
+        // ── Live-streamed OpenClaw reply -- shown as a footer below
+        //    the committed turns while the handoff is streaming, so
+        //    output appears as the model produces it rather than all at
+        //    once when the turn completes. Cleared the moment the
+        //    handoff returns; the full reply then lands in a new turns
+        //    entry. ──
+        Component {
+            id: streamingFooter
+
+            Column {
+                width: turnsList.width
+                spacing: 8
+
+                Text {
+                    text: "OpenClaw is replying…"
+                    color: root.mutedColor
+                    font.pixelSize: 11
+                    font.italic: true
+                }
+
+                Text {
+                    width: parent.width
+                    text: root.streamingText
+                    color: root.textColor
+                    font.family: "JetBrains Mono"
+                    font.pixelSize: 13
+                    wrapMode: Text.Wrap
+                }
+            }
         }
 
         Component {

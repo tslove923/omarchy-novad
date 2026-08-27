@@ -76,6 +76,17 @@ pub struct ConversationState {
     /// `converse::run_handoff_with_progress`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub thinking_elapsed_secs: Option<u64>,
+    /// The live, incrementally-streamed text of the current OpenClaw
+    /// reply -- only meaningful while `phase == Some(Thinking)`. The
+    /// panel renders this in place of a bare "Thinking…" so output
+    /// appears as the model produces it, not all at once when the turn
+    /// finishes. `None` when nothing is streaming (idle, listening,
+    /// confirming, speaking, or between turns). Cleared the moment the
+    /// handoff returns; the full reply then lands in a new `turns`
+    /// entry. See `converse::run_handoff_with_progress` and
+    /// `router::openclaw::handoff_streaming`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub streaming_text: Option<String>,
 }
 
 pub fn state_path() -> PathBuf {
@@ -138,7 +149,12 @@ pub fn write_state(state: &ConversationState) {
 /// `Confirm`'s `text`, when present, is the edited pending text to
 /// send instead of the original transcript -- an edit and a send in
 /// one action, since the UI never needs to stage an edit without also
-/// deciding whether to send it.
+/// deciding whether to send it. `SendText` is the panel's always-
+/// present chat box: a *fresh* user message, not an answer to a
+/// pending transcript. The loop treats it exactly like a just-
+/// transcribed utterance (skipping the recording step); if one is
+/// already up for review, the typed text wins and the pending
+/// transcript is discarded (see `converse::wait_for_review`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConversationAction {
     Stop,
@@ -146,6 +162,7 @@ pub enum ConversationAction {
     Reject,
     Listen,
     StopListening,
+    SendText { text: String },
 }
 
 impl ConversationAction {
@@ -156,6 +173,9 @@ impl ConversationAction {
             "reject" => Some(Self::Reject),
             "listen" => Some(Self::Listen),
             "stop_listening" => Some(Self::StopListening),
+            "send_text" => Some(Self::SendText {
+                text: text.unwrap_or_default(),
+            }),
             _ => None,
         }
     }
@@ -261,4 +281,113 @@ pub fn listen() -> anyhow::Result<()> {
 /// same effect as voxtype's own silence-timeout just user-triggered.
 pub fn stop_listening() -> anyhow::Result<()> {
     send_action("stop_listening", None)
+}
+
+/// `omarchy-novad converse send-text <text>` entry point: send `text`
+/// as a new turn's utterance from the panel's always-present chat box
+/// -- see `ConversationAction::SendText`. Fails (no socket) if no
+/// `converse start` loop is running; the UI starts one with
+/// `converse start --text` instead when the panel isn't active.
+pub fn send_text(text: &str) -> anyhow::Result<()> {
+    send_action("send_text", Some(text))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ConversationAction, ConversationPhase, ConversationState, ConversationTurn};
+
+    #[test]
+    fn state_serializes_streaming_text_when_present() {
+        let state = ConversationState {
+            active: true,
+            phase: Some(ConversationPhase::Thinking),
+            pending_text: None,
+            turns: Vec::new(),
+            thinking_elapsed_secs: Some(3),
+            streaming_text: Some("The capital of France is Par".to_string()),
+        };
+        let json = serde_json::to_string(&state).unwrap();
+        assert!(json.contains("\"streaming_text\":\"The capital of France is Par\""));
+        assert!(json.contains("\"thinking_elapsed_secs\":3"));
+    }
+
+    #[test]
+    fn state_omits_streaming_text_when_absent() {
+        let state = ConversationState {
+            active: true,
+            phase: None,
+            pending_text: None,
+            turns: Vec::new(),
+            thinking_elapsed_secs: None,
+            streaming_text: None,
+        };
+        let json = serde_json::to_string(&state).unwrap();
+        assert!(!json.contains("streaming_text"));
+        assert!(!json.contains("thinking_elapsed_secs"));
+    }
+
+    #[test]
+    fn state_round_trips_turns_with_spoken_summary() {
+        let state = ConversationState {
+            active: true,
+            phase: Some(ConversationPhase::Speaking),
+            pending_text: None,
+            turns: vec![ConversationTurn {
+                user_text: "hi".to_string(),
+                full_response: "Hello!".to_string(),
+                spoken_summary: Some("Hello!".to_string()),
+            }],
+            thinking_elapsed_secs: None,
+            streaming_text: None,
+        };
+        let json = serde_json::to_string(&state).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["turns"][0]["user_text"], "hi");
+        assert_eq!(parsed["turns"][0]["spoken_summary"], "Hello!");
+    }
+
+    #[test]
+    fn from_wire_parses_send_text() {
+        assert_eq!(
+            ConversationAction::from_wire("send_text", Some("hello".to_string())),
+            Some(ConversationAction::SendText {
+                text: "hello".to_string()
+            })
+        );
+        // Missing text defaults to empty (the loop treats empty as a
+        // no-op, so this is safe).
+        assert_eq!(
+            ConversationAction::from_wire("send_text", None),
+            Some(ConversationAction::SendText {
+                text: String::new()
+            })
+        );
+    }
+
+    #[test]
+    fn from_wire_parses_existing_actions() {
+        assert_eq!(
+            ConversationAction::from_wire("stop", None),
+            Some(ConversationAction::Stop)
+        );
+        assert_eq!(
+            ConversationAction::from_wire("confirm", Some("edited".to_string())),
+            Some(ConversationAction::Confirm {
+                text: Some("edited".to_string())
+            })
+        );
+        assert_eq!(
+            ConversationAction::from_wire("reject", None),
+            Some(ConversationAction::Reject)
+        );
+        assert_eq!(
+            ConversationAction::from_wire("listen", None),
+            Some(ConversationAction::Listen)
+        );
+        assert_eq!(
+            ConversationAction::from_wire("stop_listening", None),
+            Some(ConversationAction::StopListening)
+        );
+        assert_eq!(ConversationAction::from_wire("bogus", None), None);
+    }
 }

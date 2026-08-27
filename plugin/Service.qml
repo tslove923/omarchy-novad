@@ -119,6 +119,13 @@ QtObject {
     // timeout, so this is the only sign of life the panel can show
     // during a long-running agent turn.
     property int conversationThinkingElapsedSecs: -1
+    // The live, incrementally-streamed text of the current OpenClaw
+    // reply, or "" when nothing is streaming -- see
+    // src/conversation/mod.rs's ConversationState::streaming_text. The
+    // panel renders this in place of a bare "Thinking…" so output
+    // appears as the model produces it, not all at once when the turn
+    // finishes.
+    property string conversationStreamingText: ""
 
     readonly property var latestTurn: conversationTurns.length > 0
         ? conversationTurns[conversationTurns.length - 1] : null
@@ -137,6 +144,7 @@ QtObject {
                 root.conversationTurns = parsed.turns || [];
                 root.conversationThinkingElapsedSecs = (parsed.thinking_elapsed_secs !== undefined
                     && parsed.thinking_elapsed_secs !== null) ? parsed.thinking_elapsed_secs : -1;
+                root.conversationStreamingText = parsed.streaming_text || "";
             } catch (e) {
                 // Same non-atomic-write caveat as popup-state.json above.
             }
@@ -150,6 +158,7 @@ QtObject {
             root.conversationPendingText = "";
             root.conversationTurns = [];
             root.conversationThinkingElapsedSecs = -1;
+            root.conversationStreamingText = "";
         }
 
         onFileChanged: reload()
@@ -157,14 +166,14 @@ QtObject {
 
     // Starts the OpenClaw voice-conversation loop -- see
     // src/conversation/mod.rs's ConverseCommand::Start. The
-    // ConversationPanel (Overlay.qml) shows itself automatically the
-    // moment `conversationActive` flips true, so this is also the
-    // real equivalent of "open the chat window": there is no separate
-    // "show the panel" action, starting the loop *is* what makes it
-    // appear. Added alongside the pre-existing `stopConversation()` so
-    // BarWidget's context menu (nova's ported "OpenClaw Chat" item)
-    // can toggle the loop on/off through one Service action pair,
-    // same as every other daemon action here.
+    // ConversationPanel (Overlay.qml) is a permanent docked window now
+    // (always visible, chat box always present), so this just flips the
+    // daemon loop on -- typing in the panel's chat box while no loop is
+    // running does the same thing via `converse start --text` (see
+    // `sendText`). Added alongside the pre-existing `stopConversation()`
+    // so BarWidget's context menu (nova's ported "OpenClaw Chat" item)
+    // can toggle the loop on/off through one Service action pair, same
+    // as every other daemon action here.
     function startConversation() {
         // Own Process instance -- `converse start` is the long-running
         // loop itself (blocks until `converse stop`/Ctrl+C, same
@@ -214,6 +223,24 @@ QtObject {
     function stopListening() {
         _converseControlProcess.command = [root.novadBinary, "converse", "stop-listening"];
         _converseControlProcess.running = true;
+    }
+
+    // Sends a typed chat-box message as the next turn's utterance --
+    // see src/conversation/mod.rs's ConversationAction::SendText. If
+    // the loop is already running, the message goes to its control
+    // socket (`converse send-text`); if not, starting the loop with
+    // `--text` seeds the first turn with it (see src/converse.rs's
+    // `run`'s `initial_utterance`). Either way the typed text skips
+    // the recording step and lands in the same review/edit step as a
+    // transcript.
+    function sendText(text) {
+        if (root.conversationActive) {
+            _converseControlProcess.command = [root.novadBinary, "converse", "send-text", "--text", text];
+            _converseControlProcess.running = true;
+        } else {
+            _converseStartProcess.command = [root.novadBinary, "converse", "start", "--text", text];
+            _converseStartProcess.running = true;
+        }
     }
 
     property Process _converseStartProcess: Process { running: false }

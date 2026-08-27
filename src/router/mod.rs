@@ -16,7 +16,7 @@ mod bluebubbles;
 pub mod home_assistant;
 mod media_control;
 mod omapilot;
-mod openclaw;
+pub mod openclaw;
 mod system_control;
 mod telegram;
 mod terminal;

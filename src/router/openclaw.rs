@@ -43,6 +43,8 @@ use std::io::Write;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
+use tungstenite::Message;
+
 /// Recovery check, same shape as `bluebubbles::looks_like_message_command`
 /// / `telegram::looks_like_telegram_command`: does `text` look like it's
 /// addressing OpenClaw specifically, even through ASR noise, so
@@ -191,6 +193,396 @@ pub fn handoff(utterance: &str) -> (bool, String) {
         tracing::warn!("[router:openclaw] handoff failed: {msg}");
         (false, msg.to_string())
     }
+}
+
+// ────────────────────────── streaming gateway client ──────────────────────────
+//
+// `handoff` above shells out to the `openclaw agent` CLI, which is
+// final-only: it prints the complete reply when the turn finishes and
+// nothing before. The conversation panel needs the reply *as it's
+// produced* (see `crate::converse`'s module docs), so this module also
+// speaks the gateway WebSocket protocol directly -- the same transport
+// the CLI itself uses, just with the streamed `agent` events surfaced
+// instead of discarded. Protocol verified live against this gateway
+// (2026-08-27): `connect.challenge` → device-signed `connect` →
+// `hello-ok`, then `chat.send` streams `agent` events with
+// `stream:"assistant"` and `data:{text,delta}` (cumulative + delta)
+// until a `stream:"lifecycle"` `data.phase:"end"` event. No explicit
+// event subscription is needed -- `chat.send` alone streams to the
+// connection.
+
+/// The gateway WebSocket connection type -- `MaybeTlsStream` because
+/// the gateway is `wss://` (TLS via tungstenite's rustls feature).
+type WsStream = tungstenite::stream::MaybeTlsStream<std::net::TcpStream>;
+type Ws = tungstenite::WebSocket<WsStream>;
+
+/// How long to wait for *any* frame before declaring the gateway hung.
+/// The gateway sends a `tick` keepalive roughly every 15s, so 90s
+/// means ~6 missed keepalives -- generous for a slow agent turn (the
+/// handoff itself still has no timeout; a real multi-minute turn is
+/// fine as long as *some* frame arrives), but a real backstop against
+/// a wedged socket that the CLI path's `--timeout 86400` used to be.
+const WS_READ_TIMEOUT: Duration = Duration::from_secs(90);
+
+/// Hands `utterance` off to OpenClaw over the gateway WebSocket and
+/// calls `on_text` with the cumulative reply-so-far as each chunk
+/// streams in -- the live-output path `converse::run_handoff_with_progress`
+/// uses (see that function's docs for how the chunks reach the panel).
+/// Returns `(success, reply_or_error)` with the same contract as
+/// [`handoff`]: `reply` is OpenClaw's full answer, ready to show as-is.
+///
+/// Same conversation as `handoff` (`CONVERSATION_ID`), so a turn sent
+/// here continues the same OpenClaw session the wake-word handoff and
+/// the Herdr TUI share.
+pub fn handoff_streaming(utterance: &str, on_text: impl Fn(&str)) -> (bool, String) {
+    let clean = utterance.trim();
+    if clean.is_empty() {
+        return (false, "Nothing to hand off".to_string());
+    }
+
+    let Some((url, token)) = gateway_credentials() else {
+        return (
+            false,
+            "No OpenClaw gateway credentials found (checked $OPENCLAW_NOVAD_ENV or \
+             ~/.config/openclaw-novad.env)"
+                .to_string(),
+        );
+    };
+    let Some((device_id, public_key_pem, private_key_pem)) = device_identity() else {
+        return (
+            false,
+            "No OpenClaw device identity found (~/.openclaw/identity/device.json)"
+                .to_string(),
+        );
+    };
+
+    let (mut ws, _) = match tungstenite::connect(&url) {
+        Ok(x) => x,
+        Err(e) => {
+            tracing::warn!("[router:openclaw] ws connect failed: {e}");
+            return (false, "Couldn't connect to the OpenClaw gateway".to_string());
+        }
+    };
+    set_ws_read_timeout(&mut ws, WS_READ_TIMEOUT);
+
+    // 1. The gateway opens with a `connect.challenge` event carrying a
+    //    nonce we must sign with the device identity keypair.
+    let Some(nonce) = read_challenge(&mut ws) else {
+        return (
+            false,
+            "The OpenClaw gateway didn't send a connect challenge".to_string(),
+        );
+    };
+
+    // 2. Reply with `connect`, device-signed. The signed payload is
+    //    the gateway's v3 format -- a `|`-joined string the server
+    //    reconstructs from the connect params and verifies against the
+    //    device's public key (see the module docs and the probe that
+    //    confirmed it live). `signatureToken` is the gateway token,
+    //    matching what the CLI itself signs with (verified in the
+    //    gateway-client dist: `signatureToken = authToken ?? ...`).
+    let signed_at_ms = now_ms();
+    let scopes = ["operator.admin", "operator.read", "operator.write"];
+    let payload = build_device_auth_payload_v3(
+        &device_id,
+        "cli",
+        "cli",
+        "operator",
+        &scopes,
+        signed_at_ms,
+        &token,
+        &nonce,
+        "linux",
+        "desktop",
+    );
+    let Some(signature) = sign_ed25519(&private_key_pem, &payload) else {
+        return (false, "Couldn't sign the gateway connect request".to_string());
+    };
+    let Some(public_key) = public_key_base64url(&public_key_pem) else {
+        return (false, "Couldn't read the device public key".to_string());
+    };
+    let connect_req = serde_json::json!({
+        "type": "req", "id": "c1", "method": "connect",
+        "params": {
+            "minProtocol": 4, "maxProtocol": 4,
+            "client": { "id": "cli", "version": "2026.7.1-2", "platform": "linux",
+                        "deviceFamily": "desktop", "mode": "cli" },
+            "role": "operator",
+            "scopes": scopes,
+            "caps": [],
+            "auth": { "token": token },
+            "locale": "en-US",
+            "userAgent": "omarchy-novad/0.1",
+            "device": { "id": device_id, "publicKey": public_key, "signature": signature,
+                        "signedAt": signed_at_ms, "nonce": nonce },
+        }
+    });
+    if let Err(e) = ws.send(Message::Text(connect_req.to_string().into())) {
+        tracing::warn!("[router:openclaw] connect send failed: {e}");
+        return (false, "Couldn't send the gateway connect request".to_string());
+    }
+
+    // 3. Wait for `hello-ok` (or a rejection).
+    if !wait_for_hello_ok(&mut ws) {
+        return (false, "The OpenClaw gateway rejected the connection".to_string());
+    }
+
+    // 4. Send the message. `idempotencyKey` is the gateway's
+    //    deduplication key for side-effecting methods -- a unique
+    //    per-request value, same role the CLI's random UUID plays.
+    let run_id = format!("novad-{}-{}", now_ms(), std::process::id());
+    let send_req = serde_json::json!({
+        "type": "req", "id": "c2", "method": "chat.send",
+        "params": {
+            "sessionKey": format!("agent:main:novad:{CONVERSATION_ID}"),
+            "message": clean,
+            "idempotencyKey": run_id,
+        }
+    });
+    if let Err(e) = ws.send(Message::Text(send_req.to_string().into())) {
+        tracing::warn!("[router:openclaw] chat.send failed: {e}");
+        return (false, "Couldn't send the message to OpenClaw".to_string());
+    }
+
+    // 5. Stream `agent` events until the run ends. `data.text` is the
+    //    cumulative reply (verified live: "P" then "PONG"); fall back
+    //    to appending `data.delta` if a gateway ever omits `text`.
+    let mut full = String::new();
+    loop {
+        let msg = match ws.read() {
+            Ok(m) => m,
+            Err(e) => {
+                tracing::warn!("[router:openclaw] ws read failed: {e}");
+                break;
+            }
+        };
+        match msg {
+            Message::Text(t) => {
+                let v: serde_json::Value = match serde_json::from_str(&t) {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+                if v["type"] == "res" && v["ok"] == false {
+                    let err = v["error"]["message"].as_str().unwrap_or("unknown error");
+                    tracing::warn!("[router:openclaw] gateway error: {err}");
+                    full.clear();
+                    break;
+                }
+                if v["type"] != "event" {
+                    continue;
+                }
+                match v["event"].as_str() {
+                    Some("agent") => {
+                        let payload = &v["payload"];
+                        match payload["stream"].as_str() {
+                            Some("assistant") => {
+                                let data = &payload["data"];
+                                if let Some(text) = data["text"].as_str() {
+                                    if !text.is_empty() {
+                                        full = text.to_string();
+                                        on_text(text);
+                                    }
+                                } else if let Some(delta) = data["delta"].as_str() {
+                                    if !delta.is_empty() {
+                                        full.push_str(delta);
+                                        on_text(&full);
+                                    }
+                                }
+                            }
+                            Some("lifecycle") => {
+                                if payload["data"]["phase"].as_str() == Some("end") {
+                                    break;
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    Some("chat") => {
+                        // Belt-and-suspenders completion signal -- the
+                        // `agent` lifecycle "end" event is the primary
+                        // one, but a `chat` "final" event also marks
+                        // the turn done.
+                        if v["payload"]["state"].as_str() == Some("final") {
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            Message::Ping(p) => {
+                let _ = ws.send(Message::Pong(p));
+            }
+            Message::Close(_) => break,
+            _ => {}
+        }
+    }
+
+    if full.trim().is_empty() {
+        (false, "The external assistant replied with nothing".to_string())
+    } else {
+        (true, full)
+    }
+}
+
+/// Reads frames until the gateway's `connect.challenge` event and
+/// returns its nonce.
+fn read_challenge(ws: &mut Ws) -> Option<String> {
+    loop {
+        let msg = ws.read().ok()?;
+        match msg {
+            Message::Text(t) => {
+                let v: serde_json::Value = serde_json::from_str(&t).ok()?;
+                if v["type"] == "event" && v["event"] == "connect.challenge" {
+                    return v["payload"]["nonce"].as_str().map(str::to_string);
+                }
+            }
+            Message::Ping(p) => {
+                let _ = ws.send(Message::Pong(p));
+            }
+            Message::Close(_) => return None,
+            _ => {}
+        }
+    }
+}
+
+/// Reads frames until the `hello-ok` response to our `connect` request
+/// (true), or a rejection/close (false).
+fn wait_for_hello_ok(ws: &mut Ws) -> bool {
+    loop {
+        let msg = match ws.read() {
+            Ok(m) => m,
+            Err(e) => {
+                tracing::warn!("[router:openclaw] ws read during connect failed: {e}");
+                return false;
+            }
+        };
+        match msg {
+            Message::Text(t) => {
+                let v: serde_json::Value = match serde_json::from_str(&t) {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+                if v["type"] == "res" {
+                    if v["ok"] == true && v["payload"]["type"] == "hello-ok" {
+                        return true;
+                    }
+                    if v["ok"] == false {
+                        let err = v["error"]["message"].as_str().unwrap_or("unknown error");
+                        tracing::warn!("[router:openclaw] connect rejected: {err}");
+                        return false;
+                    }
+                }
+            }
+            Message::Ping(p) => {
+                let _ = ws.send(Message::Pong(p));
+            }
+            Message::Close(_) => return false,
+            _ => {}
+        }
+    }
+}
+
+/// Sets a read timeout on the WebSocket's underlying TCP stream so a
+/// wedged gateway (no frames at all, not even `tick` keepalives) can't
+/// hang the handoff thread forever -- see `WS_READ_TIMEOUT`.
+fn set_ws_read_timeout(ws: &mut Ws, dur: Duration) {
+    use tungstenite::stream::MaybeTlsStream;
+    let tcp: Option<&std::net::TcpStream> = match ws.get_mut() {
+        MaybeTlsStream::Plain(s) => Some(s),
+        // Only `Plain`/`Rustls` exist with the `rustls-tls-native-roots`
+        // feature (no `native-tls`); the enum is non-exhaustive upstream,
+        // so a wildcard arm is required regardless.
+        MaybeTlsStream::Rustls(s) => Some(s.get_ref()),
+        _ => None,
+    };
+    if let Some(tcp) = tcp {
+        let _ = tcp.set_read_timeout(Some(dur));
+    }
+}
+
+/// Loads the device identity keypair the gateway requires for the
+/// connect handshake -- `~/.openclaw/identity/device.json`, the same
+/// file the `openclaw` CLI itself uses. Returns
+/// `(device_id, public_key_pem, private_key_pem)`.
+fn device_identity() -> Option<(String, String, String)> {
+    let path = dirs::home_dir()?.join(".openclaw/identity/device.json");
+    let content = std::fs::read_to_string(&path).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&content).ok()?;
+    Some((
+        v["deviceId"].as_str()?.to_string(),
+        v["publicKeyPem"].as_str()?.to_string(),
+        v["privateKeyPem"].as_str()?.to_string(),
+    ))
+}
+
+/// Milliseconds since the Unix epoch -- the `signedAt`/`signedAtMs`
+/// field the gateway's device-auth payload expects.
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// The gateway's v3 device-auth payload: a `|`-joined string the
+/// server reconstructs from the connect params and verifies against
+/// the device's public key. Mirrors the CLI's
+/// `buildDeviceAuthPayloadV3` exactly (verified in the gateway-client
+/// dist and live against this gateway).
+fn build_device_auth_payload_v3(
+    device_id: &str,
+    client_id: &str,
+    client_mode: &str,
+    role: &str,
+    scopes: &[&str],
+    signed_at_ms: u64,
+    token: &str,
+    nonce: &str,
+    platform: &str,
+    device_family: &str,
+) -> String {
+    let scopes = scopes.join(",");
+    let platform = normalize_device_metadata(platform);
+    let device_family = normalize_device_metadata(device_family);
+    format!(
+        "v3|{device_id}|{client_id}|{client_mode}|{role}|{scopes}|{signed_at_ms}|{token}|{nonce}|{platform}|{device_family}"
+    )
+}
+
+/// Lowercases a device-metadata string for the auth payload, matching
+/// the CLI's `normalizeDeviceMetadataForAuth` (uppercase ASCII → lower;
+/// empty stays empty).
+fn normalize_device_metadata(value: &str) -> String {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    trimmed.chars().map(|c| c.to_ascii_lowercase()).collect()
+}
+
+/// Ed25519-signs `payload` with the device's PKCS#8 PEM private key
+/// and returns the base64url (no padding) signature the gateway
+/// expects.
+fn sign_ed25519(private_key_pem: &str, payload: &str) -> Option<String> {
+    use ed25519_dalek::pkcs8::DecodePrivateKey;
+    use ed25519_dalek::Signer;
+    let key = ed25519_dalek::SigningKey::from_pkcs8_pem(private_key_pem).ok()?;
+    let sig = key.sign(payload.as_bytes());
+    Some(base64_url_no_pad(&sig.to_bytes()))
+}
+
+/// Extracts the raw Ed25519 public key from its PEM and returns it
+/// base64url (no padding) -- the `device.publicKey` field the gateway
+/// uses to verify the connect signature.
+fn public_key_base64url(public_key_pem: &str) -> Option<String> {
+    use ed25519_dalek::pkcs8::DecodePublicKey;
+    let key = ed25519_dalek::VerifyingKey::from_public_key_pem(public_key_pem).ok()?;
+    Some(base64_url_no_pad(&key.to_bytes()))
+}
+
+fn base64_url_no_pad(bytes: &[u8]) -> String {
+    use base64::Engine;
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
 }
 
 /// How long to wait after launching/relaunching `openclaw tui` before
@@ -394,7 +786,10 @@ fn pane_shows(pane_id: &str, needle: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::looks_like_external_command;
+    use super::{
+        base64_url_no_pad, build_device_auth_payload_v3, looks_like_external_command,
+        normalize_device_metadata,
+    };
 
     #[test]
     fn catches_the_actual_live_mishearing() {
@@ -462,5 +857,58 @@ mod tests {
             "remind me to buy a new cat scratching post because the cat likes to open her claw \
              on the couch"
         ));
+    }
+
+    #[test]
+    fn device_auth_payload_v3_matches_the_gateway_format() {
+        // The exact `|`-joined shape the gateway reconstructs and
+        // verifies -- mirrors the CLI's buildDeviceAuthPayloadV3.
+        let payload = build_device_auth_payload_v3(
+            "dev-123",
+            "cli",
+            "cli",
+            "operator",
+            &["operator.admin", "operator.read"],
+            1737264000000,
+            "tok",
+            "nonce-abc",
+            "Linux",
+            "Desktop",
+        );
+        assert_eq!(
+            payload,
+            "v3|dev-123|cli|cli|operator|operator.admin,operator.read|1737264000000|tok|nonce-abc|linux|desktop"
+        );
+    }
+
+    #[test]
+    fn device_auth_payload_v3_normalizes_metadata_case() {
+        // Uppercase metadata is lowercased (the CLI's
+        // normalizeDeviceMetadataForAuth); empty stays empty.
+        let payload = build_device_auth_payload_v3(
+            "dev", "cli", "cli", "operator", &[], 1, "", "n", "LINUX", "",
+        );
+        assert_eq!(payload, "v3|dev|cli|cli|operator||1||n|linux|");
+    }
+
+    #[test]
+    fn normalize_device_metadata_lowercases_ascii_only() {
+        assert_eq!(normalize_device_metadata("Linux"), "linux");
+        assert_eq!(normalize_device_metadata("  Desktop  "), "desktop");
+        assert_eq!(normalize_device_metadata(""), "");
+        assert_eq!(normalize_device_metadata("   "), "");
+        // Non-ASCII is left alone (matches the CLI's regex on [A-Z]).
+        assert_eq!(normalize_device_metadata("Ünïcode"), "Ünïcode");
+    }
+
+    #[test]
+    fn base64_url_no_pad_omits_padding_and_uses_url_alphabet() {
+        // "f" is 0x66 → base64 "Zg==" → URL-safe no-pad "Zg".
+        assert_eq!(base64_url_no_pad(b"f"), "Zg");
+        // 3 bytes → no padding needed anyway.
+        assert_eq!(base64_url_no_pad(b"abc"), "YWJj");
+        // Bytes that would produce "+" and "/" in standard base64 use
+        // "-" and "_" instead: 0xfb 0xef 0xff → "++//" → "--__".
+        assert_eq!(base64_url_no_pad(&[0xfb, 0xef, 0xff]), "--__");
     }
 }

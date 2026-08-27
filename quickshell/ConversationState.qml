@@ -32,6 +32,10 @@ QtObject {
     // Array of { user_text, full_response, spoken_summary } objects,
     // oldest first -- see src/conversation/mod.rs's ConversationTurn.
     property var turns: []
+    // The live, incrementally-streamed text of the current OpenClaw
+    // reply, or "" when nothing is streaming -- see
+    // src/conversation/mod.rs's ConversationState::streaming_text.
+    property string streamingText: ""
 
     property FileView _fileView: FileView {
         path: root.statePath
@@ -45,6 +49,7 @@ QtObject {
                 root.phase = parsed.phase || "";
                 root.pendingText = parsed.pending_text || "";
                 root.turns = parsed.turns || [];
+                root.streamingText = parsed.streaming_text || "";
             } catch (e) {
                 // Daemon writes the file non-atomically; a torn read
                 // during a write is possible and not worth logging.
@@ -58,6 +63,7 @@ QtObject {
             root.phase = "";
             root.pendingText = "";
             root.turns = [];
+            root.streamingText = "";
         }
 
         onFileChanged: reload()

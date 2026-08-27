@@ -112,12 +112,11 @@
 //     (Service.qml's startConversation()/stopConversation(), added
 //     alongside this redesign -- stopConversation() already existed
 //     for the quick-status popup's "Stop conversation" button).
-//     ConversationPanel (Overlay.qml) shows itself automatically the
-//     instant `conversationActive` flips true and there's no separate
-//     "just show the window" action the way nova's Electron window
-//     had -- starting the loop *is* opening the chat here, so the
-//     label/action toggles based on `conversationActive` rather than
-//     always being "start".
+//     ConversationPanel (Overlay.qml) is a permanent docked window
+//     (always visible, chat box always present -- typing in it starts
+//     the loop via `converse start --text`), so this item just toggles
+//     the daemon loop itself; the label/action toggles based on
+//     `conversationActive` rather than always being "start".
 //   - "Config": ADAPTED to "Open Config File". There's no dedicated
 //     config UI/window anywhere in this project (unlike nova, which
 //     had `createConfigWindow()`) -- everything lives in one real

@@ -334,6 +334,7 @@ PanelWindow {
             spacing: 14
             model: conversationState.turns
             delegate: turnDelegate
+            footer: conversationState.streamingText.length > 0 ? streamingFooter : null
 
             ScrollBar.vertical: ScrollBar {
                 policy: ScrollBar.AsNeeded
@@ -351,6 +352,17 @@ PanelWindow {
             // tick" trick as popup's Behavior-driven resizes.
             onCountChanged: Qt.callLater(turnsList.positionViewAtEnd)
             Component.onCompleted: Qt.callLater(turnsList.positionViewAtEnd)
+
+            // The streamed reply grows as deltas arrive -- keep the
+            // newest text in view. (A Connections block rather than an
+            // `onStreamingTextChanged` handler, which would only fire
+            // for a signal on the ListView itself.)
+            Connections {
+                target: conversationState
+                function onStreamingTextChanged() {
+                    Qt.callLater(turnsList.positionViewAtEnd);
+                }
+            }
         }
 
         Text {
@@ -358,7 +370,38 @@ PanelWindow {
             text: "Waiting for the first turn…"
             color: root.mutedColor
             font.pixelSize: 13
-            visible: turnsList.count === 0
+            visible: turnsList.count === 0 && conversationState.streamingText.length === 0
+        }
+
+        // ── Live-streamed OpenClaw reply -- shown as a footer below
+        //    the committed turns while the handoff is streaming, so
+        //    output appears as the model produces it rather than all at
+        //    once when the turn completes. Cleared the moment the
+        //    handoff returns; the full reply then lands in a new turns
+        //    entry. ──
+        Component {
+            id: streamingFooter
+
+            Column {
+                width: turnsList.width
+                spacing: 8
+
+                Text {
+                    text: "OpenClaw is replying…"
+                    color: root.mutedColor
+                    font.pixelSize: 11
+                    font.italic: true
+                }
+
+                Text {
+                    width: parent.width
+                    text: conversationState.streamingText
+                    color: root.textColor
+                    font.family: "JetBrains Mono"
+                    font.pixelSize: 13
+                    wrapMode: Text.Wrap
+                }
+            }
         }
 
         Component {

@@ -69,6 +69,21 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 thiserror = "1"
 anyhow = "1"
 dirs = "5"
+
+# Live streaming of OpenClaw replies into the conversation panel --
+# `converse`'s handoff connects straight to the gateway WebSocket
+# (wss://) instead of the final-only `openclaw agent` CLI, so deltas
+# arrive as the model produces them. tungstenite is the sync WS client
+# (the handoff runs on a plain std::thread, no tokio runtime needed);
+# rustls-tls-native-roots gives it wss:// without pulling in OpenSSL.
+# ed25519-dalek signs the gateway's connect challenge with the device
+# identity keypair (~/.openclaw/identity/device.json) -- see
+# router::openclaw's module docs for the exact v3 payload format.
+# base64 is the URL-safe no-pad encoding the gateway expects for the
+# signature and public key.
+tungstenite = { version = "0.24", features = ["rustls-tls-native-roots"] }
+ed25519-dalek = { version = "2", features = ["pkcs8", "pem"] }
+base64 = "0.22"
 grammers-mtsender = "0.10.0"
 grammers-tl-types = "0.10.0"
 minijinja = { version = "2.24.0", features = ["json"] }

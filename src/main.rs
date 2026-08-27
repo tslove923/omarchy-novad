@@ -244,6 +244,16 @@ enum ConverseCommand {
     /// listening), same effect as voxtype's own silence-timeout just
     /// user-triggered.
     StopListening,
+    /// Send `text` as a new turn's utterance from the panel's
+    /// always-present chat box -- the loop treats it exactly like a
+    /// just-transcribed utterance, skipping the recording step. Fails
+    /// if no `converse start` loop is running; the UI starts one with
+    /// `converse start --text` instead when the panel isn't active.
+    SendText {
+        /// The message to send.
+        #[arg(long)]
+        text: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -381,6 +391,9 @@ fn main() -> anyhow::Result<()> {
         Command::Converse {
             what: ConverseCommand::StopListening,
         } => conversation::stop_listening(),
+        Command::Converse {
+            what: ConverseCommand::SendText { text },
+        } => conversation::send_text(&text),
     }
 }
 

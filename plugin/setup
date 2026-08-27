@@ -76,31 +76,6 @@ plugin's Approve/Deny/Stop/Confirm buttons don't work, point it at $NOVAD_BIN yo
 or move it aside and rerun this script."
 fi
 
-# ── 1c. Same PATH problem, for `openclaw` ───────────────────────────
-#
-# Found live: `scripts/openclaw-handoff` (what the OpenClaw/Coding
-# router intent shells out to) failed with "openclaw: command not
-# found" even though `openclaw` worked fine interactively -- it lives
-# under a project checkout's own bin/ dir (an interactive-shell-only
-# PATH addition), which is invisible to `omarchy-novad-detect.service`
-# for the exact same reason 1b explains for omarchy-novad itself.
-# Same fix: symlink it into ~/.local/bin, which is confirmed on both
-# the systemd user service's and the graphical shell's PATH. Skipped
-# quietly (not fail/warn) when `openclaw` isn't installed at all --
-# OpenClaw handoff is an optional integration, not a hard requirement.
-OPENCLAW_BIN=$(command -v openclaw || true)
-if [[ -n $OPENCLAW_BIN ]]; then
-  OPENCLAW_BIN=$(readlink -f "$OPENCLAW_BIN")
-  if [[ -L "$LOCAL_BIN/openclaw" || ! -e "$LOCAL_BIN/openclaw" ]]; then
-    ln -sf "$OPENCLAW_BIN" "$LOCAL_BIN/openclaw"
-    info "Linked $LOCAL_BIN/openclaw -> $OPENCLAW_BIN (so the OpenClaw handoff can find it)."
-  elif [[ "$(readlink -f "$LOCAL_BIN/openclaw")" != "$OPENCLAW_BIN" ]]; then
-    warn "\n$LOCAL_BIN/openclaw already exists and isn't a symlink this script manages --
-leaving it alone. If OpenClaw handoffs fail with \"openclaw: command not found\" in
-journalctl --user -u omarchy-novad-detect, point it at $OPENCLAW_BIN yourself."
-  fi
-fi
-
 # ── 2. Locate an OpenVINO GenAI SDK runtime for `serve` ─────────────
 #
 # `omarchy-novad serve` dlopens OpenVINO's shared libraries at startup

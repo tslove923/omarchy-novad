@@ -40,7 +40,7 @@
 //! gateway actually reports a pending request.
 
 use std::io::Write;
-use std::process::{Command, Stdio};
+use std::process::Command;
 use std::time::Duration;
 
 use tungstenite::Message;
@@ -107,93 +107,6 @@ pub fn looks_like_external_command(text: &str) -> bool {
 /// ever needs to distinguish separate voice "conversations" (e.g. a
 /// timeout-based reset, or multiple concurrent users).
 const CONVERSATION_ID: &str = "voice";
-
-/// Hands `utterance` off to OpenClaw via the `openclaw-handoff` CLI
-/// bridge and returns `(success, reply_or_error)`. `reply` is
-/// OpenClaw's answer, ready to show as-is in the popup's Ready phase.
-pub fn handoff(utterance: &str) -> (bool, String) {
-    let clean = utterance.trim();
-    if clean.is_empty() {
-        return (false, "Nothing to hand off".to_string());
-    }
-
-    tracing::debug!("[router:openclaw] handoff: {clean:?}");
-
-    let mut child = match Command::new("openclaw-handoff")
-        .arg(clean)
-        .arg(CONVERSATION_ID)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-    {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::warn!("[router:openclaw] failed to spawn openclaw-handoff: {e}");
-            return (
-                false,
-                "The external assistant isn't available right now".to_string(),
-            );
-        }
-    };
-
-    // No timeout, deliberately -- a real agent turn (file edits,
-    // service restarts, multi-step tool use) can legitimately run for
-    // minutes, and there's no way to distinguish "still working" from
-    // "hung" from out here. Found live: an earlier 60s cap (later
-    // raised to 660s) killed real, still-working tasks with a false
-    // "took too long" failure well before they'd actually have
-    // finished successfully. `scripts/openclaw-handoff` passes its own
-    // generous `--timeout` to the `openclaw` CLI itself as the actual
-    // backstop against a truly wedged gateway -- this call just waits
-    // for that process to exit, however long it takes.
-    let status = match child.wait() {
-        Ok(status) => status,
-        Err(e) => {
-            tracing::warn!("[router:openclaw] wait failed: {e}");
-            return (
-                false,
-                "The external assistant failed to respond".to_string(),
-            );
-        }
-    };
-
-    let mut stdout = String::new();
-    let mut stderr = String::new();
-    {
-        use std::io::Read;
-        if let Some(mut out) = child.stdout.take() {
-            let _ = out.read_to_string(&mut stdout);
-        }
-        if let Some(mut err) = child.stderr.take() {
-            let _ = err.read_to_string(&mut stderr);
-        }
-    }
-
-    if status.success() {
-        let reply = stdout.trim();
-        if reply.is_empty() {
-            (
-                false,
-                "The external assistant replied with nothing".to_string(),
-            )
-        } else {
-            (true, reply.to_string())
-        }
-    } else {
-        // openclaw-handoff writes its own user-facing fallback line to
-        // stderr on failure (gateway unreachable, device unpaired,
-        // etc.) -- surface that instead of a generic message so the
-        // popup shows the real reason.
-        let msg = stderr.lines().last().unwrap_or("").trim();
-        let msg = if msg.is_empty() {
-            "The external assistant is unavailable right now"
-        } else {
-            msg
-        };
-        tracing::warn!("[router:openclaw] handoff failed: {msg}");
-        (false, msg.to_string())
-    }
-}
 
 // ────────────────────────── streaming gateway client ──────────────────────────
 //

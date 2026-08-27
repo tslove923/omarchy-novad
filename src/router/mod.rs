@@ -23,7 +23,7 @@ mod terminal;
 mod web;
 
 use crate::classify::Intent;
-use crate::config::{BlueBubblesConfig, HomeAssistantConfig, OmaPilotConfig, TelegramConfig};
+use crate::config::{BlueBubblesConfig, HomeAssistantConfig, TelegramConfig};
 
 pub use omapilot::{ask as ask_omapilot, strip_direct_target_prefix};
 
@@ -213,41 +213,12 @@ pub fn route(
             None => RouteResult::Unhandled,
         },
         // External/Coding don't go through here -- pipeline.rs checks
-        // is_external_handoff() before calling route() and calls
-        // openclaw::handoff() directly against the full transcript
-        // instead of this intent's (often keyword-stripped) argument.
-        // A coding/reasoning request needs the whole utterance for
-        // context, not an extracted phrase -- see openclaw.rs's docs.
+        // is_external_handoff() before calling route() and enters the
+        // full conversation loop (crate::converse) against the whole
+        // transcript instead of this intent's (often keyword-stripped)
+        // argument. A coding/reasoning request needs the full utterance
+        // for context, not an extracted phrase -- see openclaw.rs's docs.
         Intent::MemoryReturn | Intent::Coding | Intent::External => RouteResult::Unhandled,
-    }
-}
-
-/// Hands `utterance` off to an external assistant -- called directly
-/// by pipeline.rs for `Intent::External`/`Intent::Coding` against the
-/// full transcript (bypassing [`route`] and its argument-only
-/// signature) -- see `is_external_handoff` and openclaw.rs's module
-/// docs for why.
-///
-/// OpenClaw is tried first whenever it's reachable (a real
-/// synchronous reply for the popup to show), regardless of whether
-/// OmaPilot is configured. OmaPilot (see omapilot.rs) is tried only
-/// as a fallback -- when `[omapilot] fallback = true` and OpenClaw's
-/// attempt failed (not installed, gateway down, timed out) -- since
-/// its `askText` handoff can only report success/failure, never the
-/// actual answer.
-pub fn handoff_external(utterance: &str, omapilot: Option<&OmaPilotConfig>) -> (bool, String) {
-    let (ok, message) = openclaw::handoff(utterance);
-    if ok {
-        return (ok, message);
-    }
-    match omapilot {
-        Some(cfg) if cfg.fallback => {
-            tracing::info!(
-                "[router] OpenClaw handoff failed ({message:?}), falling back to OmaPilot"
-            );
-            omapilot::ask(utterance, cfg)
-        }
-        _ => (ok, message),
     }
 }
 

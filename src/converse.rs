@@ -33,12 +33,10 @@
 //! than all at once when the turn completes.
 //!
 //! Reuses existing pieces rather than inventing new ones:
-//! `router::handoff_external` (the same call the automatic wake-word
-//! handoff makes, `omapilot: None` so it never falls back to OmaPilot
-//! -- this is explicitly an OpenClaw conversation) keeps every turn on
-//! the same `CONVERSATION_ID` OpenClaw session (see
-//! `router::openclaw`'s module docs), so context carries across turns
-//! the same way it already does for the wake-word path.
+//! `router::openclaw::handoff_streaming` keeps every turn on the same
+//! `CONVERSATION_ID` OpenClaw session (see `router::openclaw`'s module
+//! docs), so context carries across turns the same way it already does
+//! for the wake-word path.
 //! `pipeline::listen_and_transcribe` is the exact record+transcribe
 //! round-trip `pipeline::run_session` uses for its own single turn,
 //! just callable again per turn here, wrapped in `listen_interruptibly`

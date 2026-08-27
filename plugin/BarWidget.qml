@@ -339,7 +339,16 @@ Panel {
     property Process _quitProcess: Process { running: false }
 
     implicitWidth: iconWrap.width + 12
-    implicitHeight: 22
+    // Must match what every first-party module gets from WidgetButton
+    // (`implicitHeight: barSize`, i.e. `bar.barSize`/Style.bar.sizeHorizontal)
+    // -- the bar's Row lays modules out top-aligned with no cross-axis
+    // centering of its own (plain QtQuick Row, not RowLayout), so a
+    // shorter implicitHeight here sits flush with the row's top edge
+    // instead of centered in the bar. This was hardcoded to 22 (the
+    // icon's own pixel size) before, which is smaller than the bar's
+    // actual height and is exactly why the icon rendered skewed toward
+    // the top of the bar.
+    implicitHeight: root.bar ? root.bar.barSize : 26
 
     // ── Bar button: the ported sphere icon (see header comment for
     //    the state->asset mapping), plus a themed attention ring for

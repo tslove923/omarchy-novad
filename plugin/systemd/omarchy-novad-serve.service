@@ -1,0 +1,19 @@
+[Unit]
+Description=omarchy-novad local LLM server (intent classification)
+Documentation=https://github.com/tslove923/omarchy-novad
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+# The @-bracketed placeholders below are substituted by ./setup at
+# install time -- see that script for how each is detected. This file
+# as checked into the plugin is a template, not a unit systemd can
+# load directly.
+Environment=LD_LIBRARY_PATH=@LD_LIBRARY_PATH@
+ExecStart=@NOVAD_BIN@ serve --model @MODEL_PATH@ --device @SERVE_DEVICE@ --model-id @MODEL_ID@ --port @SERVE_PORT@
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,23 @@
+[Unit]
+Description=omarchy-novad TTS server (Kokoro, for the `converse` voice loop)
+Documentation=https://github.com/tslove923/omarchy-novad
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+# @TTS_DIR@ and @UV_BIN@ are substituted by ./setup at install time --
+# @TTS_DIR@ is the `tts-prototype/` directory inside a real omarchy-novad
+# source checkout (this plugin doesn't vendor the model files or the
+# Python project itself; see the plugin README). Only installed
+# *enabled* when ./setup can actually find that checkout and its model
+# files -- otherwise this unit is written but left disabled, since
+# `converse` is optional and most of this plugin's daemon flow doesn't
+# need it.
+WorkingDirectory=@TTS_DIR@
+ExecStart=@UV_BIN@ run uvicorn server:app --host 127.0.0.1 --port 8421
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target

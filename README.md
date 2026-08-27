@@ -19,8 +19,10 @@ detection, dictation via [voxtype](https://github.com/peteonrails/voxtype)
 classification, a scoped command router (app launch, web search/open,
 volume/brightness, MPRIS media control, Home Assistant, BlueBubbles
 messaging, sandboxed terminal commands), and OpenClaw handoff for
-anything else. Not yet a real Omarchy shell plugin — see
-[Roadmap](#roadmap).
+anything else. Also packaged as a real Omarchy shell plugin — see
+[`plugin/`](plugin/) (its own README covers install/setup; the
+standalone `qs -p quickshell` workflow below still works independently
+for local dev/testing).
 
 ## Architecture
 
@@ -33,7 +35,8 @@ anything else. Not yet a real Omarchy shell plugin — see
 | `src/config.rs` | Persistent config file (`~/.config/omarchy-novad/config.toml`) — see [Configuration](#configuration) |
 | `src/popup/` | Popup state machine + Unix-socket control channel; also where the confirm/approve round-trip lives (`PopupPhase::Confirming`, `PopupAction::Approve`/`Deny`) for anything that shouldn't execute straight from a voice command — see [Confirmation flow](#confirmation-flow) |
 | `omarchy-novad serve` | Hosts a local OpenVINO GenAI model behind an OpenAI-compatible `/v1/chat/completions` API — this is what `classify` talks to |
-| `quickshell/` | The popup UI (Quickshell/QML), themed live from `~/.local/state/omarchy/current/theme/colors.toml` |
+| `quickshell/` | Standalone dev/test UI (Quickshell/QML), run via `qs -p quickshell`, themed live from `~/.local/state/omarchy/current/theme/colors.toml` |
+| `plugin/` | The same UI ported onto the real Omarchy shell plugin contract (`service`/`bar-widget`/`overlay`), plus systemd `--user` units + a `setup`/`remove` script pair for the daemon itself — see [`plugin/README.md`](plugin/README.md) |
 
 Two triggers are supported for what a detected wake word does
 (`--on-detect`):
@@ -689,16 +692,14 @@ prompt in `src/classify/mod.rs`.
 
 ## Roadmap
 
-- **Real Omarchy shell plugin.** Today the popup is a standalone
-  `qs -p quickshell` process this daemon spawns itself — not a plugin
-  the Omarchy shell discovers and loads via its own plugin registry.
-  Getting there means a `manifest.json` (schemaVersion, id, declared
-  `kinds`, matching `entryPoints`), restructuring the popup as a
-  loadable `overlay` entry point (and possibly a `bar-widget` for an
-  idle/listening status indicator), and moving control from this
-  daemon's own `qs -p` invocation into the shell's plugin lifecycle.
-  Run `omarchy plugin validate <folder>` against whatever's built to
-  confirm it actually passes the schema the shell enforces.
+- **~~Real Omarchy shell plugin.~~ Done — see [`plugin/`](plugin/).**
+  `manifest.json` declares `service`/`bar-widget`/`overlay` kinds; the
+  popup and OpenClaw transcript are ported onto the `overlay` entry
+  point (host-injected `Item`s instead of this daemon's own `qs -p`
+  process), a `Service.qml` owns the shared state, and a small
+  `BarWidget.qml` gives an at-a-glance status indicator. Passes
+  `omarchy plugin validate plugin/`. Not yet published/hosted anywhere
+  `omarchy plugin add` can reach — that's a separate step.
 - **Config menu.** `config.toml` (see [Configuration](#configuration))
   covers everything now, but only as a text file — a Quickshell-based
   settings UI (wake word, classify model, Home Assistant/BlueBubbles

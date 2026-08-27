@@ -41,6 +41,20 @@ QtObject {
         return (xdg && xdg.length > 0) ? xdg : "/tmp";
     }
 
+    // ────────────────────────── side-panel visibility ──────────────────────────
+    // Whether the docked ConversationPanel is shown. Pure UI state (the
+    // daemon neither knows nor cares about it) -- it lives here so the
+    // bar widget's tray-icon click and the panel itself read/write one
+    // shared value. The panel auto-shows when a turn needs review
+    // (ConversationPanel binds `visible` to `panelVisible || phase ===
+    // "confirming"`), so hiding it never strands a pending transcript
+    // the user can't confirm.
+    property bool panelVisible: true
+
+    function togglePanel() {
+        root.panelVisible = !root.panelVisible;
+    }
+
     // ────────────────────────────── popup state ──────────────────────────────
     // Dictation review / command confirmation -- see src/popup/mod.rs's
     // PopupPhase. Mirrors quickshell/PopupState.qml's fields exactly.

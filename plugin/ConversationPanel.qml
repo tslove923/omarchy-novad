@@ -48,10 +48,12 @@ PanelWindow {
     readonly property int thinkingElapsedSecs: root.service ? root.service.conversationThinkingElapsedSecs : -1
     readonly property string streamingText: root.service ? root.service.conversationStreamingText : ""
 
-    // Always visible -- this is a permanent docked chat window, not a
-    // transient card. The empty state (no conversation running) shows
+    // Visible unless the user hid it via the tray icon
+    // (service.togglePanel) -- but always pops back when a turn needs
+    // review, so hiding it never strands a pending transcript the user
+    // can't confirm. The empty state (no conversation running) shows
     // the idle status + the always-present chat box.
-    visible: true
+    visible: root.service ? (root.service.panelVisible || root.phase === "confirming") : true
 
     anchors { top: true; bottom: true; left: true; right: true }
     color: "transparent"
@@ -401,9 +403,13 @@ PanelWindow {
             //    --text`) or sends a new turn's message mid-
             //    conversation (`converse send-text`). Enter sends,
             //    Shift+Enter inserts a newline. Grows with content up
-            //    to a cap, then scrolls internally. ──
+            //    to a cap, then scrolls internally. Hidden while a
+            //    pending transcript is up for review -- the confirm
+            //    box above is the single input surface then, so the
+            //    two never stack into a confusing double chat box. ──
             Rectangle {
                 id: chatBox
+                visible: !root.confirmBoxVisible
                 width: parent.width
                 height: Math.min(Math.max(chatField.implicitHeight + 20, 40), 120)
                 radius: 8

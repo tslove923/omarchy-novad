@@ -12,9 +12,10 @@
 // lifecycle and an IpcHandler for free. This redesign only touches
 // the icon artwork and adds the context menu; the surrounding
 // architecture (Panel base, Service.qml as the single source of
-// state/actions, the self-managed layer-shell popup instead of
-// `qs.Ui.KeyboardPanel`) is unchanged from the original file -- see
-// the "Quick-status popup" comment further down for why.
+// state/actions) is unchanged from the original file. The original
+// quick-status popup is gone -- the docked ConversationPanel
+// (Overlay.qml) supersedes it, and left-click on this icon now
+// toggles that panel's visibility instead (see the MouseArea below).
 //
 // ── Icon-state mapping ──────────────────────────────────────────────
 //
@@ -111,7 +112,7 @@
 //     equivalent: `omarchy-novad converse start`/`stop`
 //     (Service.qml's startConversation()/stopConversation(), added
 //     alongside this redesign -- stopConversation() already existed
-//     for the quick-status popup's "Stop conversation" button).
+//     for the old quick-status popup's "Stop conversation" button).
 //     ConversationPanel (Overlay.qml) is a permanent docked window
 //     (always visible, chat box always present -- typing in it starts
 //     the loop via `converse start --text`), so this item just toggles
@@ -204,7 +205,6 @@ Panel {
     readonly property string popupPhase: serviceReady ? novad.popupPhase : "idle"
     readonly property bool conversationActive: serviceReady && novad.conversationActive
     readonly property string conversationPhase: serviceReady ? novad.conversationPhase : ""
-    readonly property string conversationPendingText: serviceReady ? novad.conversationPendingText : ""
 
     // "Busy" whenever there's anything happening worth a glance: a
     // popup phase other than idle, or an active OpenClaw conversation.
@@ -242,58 +242,11 @@ Panel {
 
     readonly property string iconSource: "icons/tray-" + iconState + ".png"
 
-    // Themed (not ported) dot color for the quick-status popup's
-    // header line below -- unchanged from before this redesign. Kept
-    // distinct from the bar button's ported sphere icon: this dot
-    // lives inside the detail card, not on the bar icon itself.
-    readonly property color dotColor: {
-        if (conversationActive) {
-            switch (conversationPhase) {
-            case "listening": return OmarchyTheme.accent;
-            case "confirming": return OmarchyTheme.yellow;
-            case "thinking": return OmarchyTheme.magenta;
-            case "speaking": return OmarchyTheme.green;
-            default: return OmarchyTheme.accent;
-            }
-        }
-        switch (popupPhase) {
-        case "recording": return OmarchyTheme.red;
-        case "transcribing": return OmarchyTheme.accent;
-        case "classifying": return OmarchyTheme.magenta;
-        case "handing_off": return OmarchyTheme.accent;
-        case "confirming": return OmarchyTheme.yellow;
-        case "ready": return OmarchyTheme.green;
-        default: return OmarchyTheme.muted;
-        }
-    }
-
-    readonly property string statusLabel: {
-        if (conversationActive) {
-            switch (conversationPhase) {
-            case "listening": return "Listening…";
-            case "confirming": return "Confirming…";
-            case "thinking": return "Thinking…";
-            case "speaking": return "Speaking…";
-            default: return "Conversing";
-            }
-        }
-        switch (popupPhase) {
-        case "listening": return "Listening…";
-        case "recording": return "Recording…";
-        case "transcribing": return "Transcribing…";
-        case "classifying": return "Thinking…";
-        case "handing_off": return "Asking OpenClaw…";
-        case "confirming": return "Confirm pending";
-        case "ready": return "Ready to insert";
-        default: return "Idle";
-        }
-    }
-
     // Local UI-only state for the context menu -- not part of the
-    // shared Panel `opened` lifecycle (that's the quick-status popup's
-    // job below) since a bar widget only gets one `opened`/IPC-managed
-    // popout from the base class, and the two surfaces need to be
-    // independently toggleable from left- vs. right-click.
+    // shared Panel `opened` lifecycle (that was the removed quick-status
+    // popup's job) since a bar widget only gets one `opened`/IPC-managed
+    // popout from the base class, and the context menu is toggled
+    // directly from right-click.
     property bool contextMenuOpen: false
     // Click-to-arm confirmation for the "Quit omarchy-novad…" row --
     // see this file's header comment for why a full quit here is
@@ -405,122 +358,24 @@ Panel {
                 if (!root.contextMenuOpen) root.quitArmed = false;
             } else {
                 root.closeContextMenu();
-                root.toggle();
-            }
-        }
-    }
-
-    // ── Quick-status popup -- self-managed layer-shell surface, same
-    //    pattern PopupCard.qml/ConversationPanel.qml use (a plain
-    //    `PanelWindow` child, gated on `root.opened` from the `Panel`
-    //    base instead of the host's own KeyboardPanel dropdown helper
-    //    -- kept intentionally simple since this popup only ever shows
-    //    a couple of lines of status and two buttons). Docks near the
-    //    top-right corner rather than tracking the bar icon's exact
-    //    position (`qs.Ui.KeyboardPanel` does that properly for
-    //    first-party widgets, at the cost of real integration with the
-    //    bar's own popout-coordination internals) -- reasonable for a
-    //    single small third-party widget, revisit if that ever feels
-    //    imprecise in practice. Left-click only; right-click opens the
-    //    separate context menu below instead. ──
-    PanelWindow {
-        id: statusPopup
-        visible: root.opened
-
-        anchors { top: true; right: true }
-        color: "transparent"
-        exclusionMode: ExclusionMode.Ignore
-
-        WlrLayershell.namespace: "omarchy-novad-bar-status"
-        WlrLayershell.layer: WlrLayer.Overlay
-        WlrLayershell.keyboardFocus: WlrKeyboardFocus.None
-
-        implicitWidth: card.width + 24
-        implicitHeight: card.height + 24
-
-        mask: Region {
-            x: card.x
-            y: card.y
-            width: card.width
-            height: card.height
-        }
-
-        Rectangle {
-            id: card
-            width: 280
-            implicitHeight: column.implicitHeight + 24
-            height: implicitHeight
-            x: 12
-            y: 12
-            radius: 10
-            color: OmarchyTheme.background
-
-            MouseArea { anchors.fill: parent } // swallow clicks so they don't fall through
-
-            Column {
-                id: column
-                width: parent.width - 28
-                x: 14
-                y: 12
-                spacing: 8
-
-                Row {
-                    spacing: 8
-                    Rectangle {
-                        width: 8; height: 8; radius: 4
-                        color: root.dotColor
-                        anchors.verticalCenter: parent.verticalCenter
-                    }
-                    Text {
-                        text: root.statusLabel
-                        color: OmarchyTheme.foreground
-                        font.pixelSize: 13
-                        font.weight: Font.Medium
-                        anchors.verticalCenter: parent.verticalCenter
-                    }
-                }
-
-                Text {
-                    width: parent.width
-                    text: root.conversationActive && root.conversationPendingText.length > 0
-                        ? root.conversationPendingText
-                        : (root.serviceReady && root.novad.popupText.length > 0 ? root.novad.popupText : "Nothing pending.")
-                    color: OmarchyTheme.muted
-                    font.pixelSize: 12
-                    wrapMode: Text.Wrap
-                    maximumLineCount: 4
-                    elide: Text.ElideRight
-                }
-
-                Row {
-                    spacing: 6
-                    anchors.right: parent.right
-
-                    PopupButton {
-                        label: "Dismiss"
-                        tint: OmarchyTheme.red
-                        visible: root.popupPhase !== "idle"
-                        onClicked: if (root.serviceReady) root.novad.respond("deny")
-                    }
-                    PopupButton {
-                        label: "Stop conversation"
-                        tint: OmarchyTheme.red
-                        visible: root.conversationActive
-                        onClicked: if (root.serviceReady) root.novad.stopConversation()
-                    }
-                }
+                // Left-click hides/shows the docked ConversationPanel --
+                // the persistent OpenClaw chat window. The old
+                // quick-status popup is gone (the panel supersedes it:
+                // same status line, pending text, and Stop action, plus
+                // the full transcript and compose bar).
+                if (root.serviceReady) root.novad.togglePanel();
             }
         }
     }
 
     // ── Context menu -- the ported nova tray menu, right-click only.
-    //    Same self-managed-PanelWindow shape as statusPopup above
-    //    (see that comment for why); a separate surface rather than a
-    //    second mode of the same card since nova's menu and this
-    //    widget's quick-status card serve genuinely different
-    //    purposes (menu = occasional actions; card = at-a-glance
-    //    status + the two most common one-click actions) and were
-    //    never meant to compete for the same click. ──
+    //    Self-managed layer-shell surface, same pattern the old
+    //    quick-status popup used (a plain `PanelWindow` child, gated on
+    //    `root.contextMenuOpen`). The quick-status popup itself is gone
+    //    -- the docked ConversationPanel supersedes it (same status
+    //    line, pending text, and Stop action, plus the full transcript
+    //    and compose bar), and left-click now toggles that panel's
+    //    visibility instead. ──
     PanelWindow {
         id: contextMenu
         visible: root.contextMenuOpen

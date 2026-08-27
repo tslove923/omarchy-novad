@@ -69,7 +69,32 @@ pub fn looks_like_external_command(text: &str) -> bool {
     // window was the right shape for the original ASR-mangled-trigger-
     // word failure this was built for ("Ask open. Claw. what..."), but
     // it's too narrow for how people actually phrase these.
-    cleaned.contains("openclaw") || cleaned.contains("open claw")
+    if cleaned.contains("openclaw") || cleaned.contains("open claw") {
+        return true;
+    }
+
+    // "open <word> claw" -- observed live: voxtype transcribed "ask
+    // OpenClaw to give a status on the home assistant" as "ask open
+    // cloud claw to give it a status on a status on the home
+    // assistant", inserting a word between the two halves of the name.
+    // A general "open X claw" window would also match "open her claw"
+    // (a real false positive -- the cat opens its claw), so the
+    // intervening token is only allowed when it isn't a
+    // pronoun/possessive/article: "cloud" isn't one, "her" is. One
+    // intervening token covers the observed case; widen if a longer
+    // insertion ever shows up live.
+    const FILLER_EXCLUSIONS: &[&str] = &[
+        "her", "his", "its", "my", "your", "our", "their", "the", "a", "an", "this", "that",
+        "these", "those",
+    ];
+    let tokens: Vec<&str> = cleaned.split_whitespace().collect();
+    for i in 0..tokens.len().saturating_sub(2) {
+        if tokens[i] == "open" && tokens[i + 2] == "claw" && !FILLER_EXCLUSIONS.contains(&tokens[i + 1])
+        {
+            return true;
+        }
+    }
+    false
 }
 
 /// All wake-word-triggered handoffs share one conversation so OpenClaw
@@ -411,6 +436,20 @@ mod tests {
         ));
         assert!(looks_like_external_command(
             "Ask OpenClaw what's the status with Home Assistant."
+        ));
+    }
+
+    #[test]
+    fn catches_an_inserted_word_between_open_and_claw() {
+        // Observed live: voxtype transcribed "ask OpenClaw to give a
+        // status on the home assistant" as "ask open cloud claw to give
+        // it a status on a status on the home assistant" -- an inserted
+        // word between the two halves of the name. The classifier read
+        // it as HOME_ASSISTANT (the utterance also names that topic) and
+        // the pre-fix matcher missed it entirely, so the request was
+        // handled as a device command instead of handed off.
+        assert!(looks_like_external_command(
+            "ask open cloud claw to give it a status on a status on the home assistant"
         ));
     }
 

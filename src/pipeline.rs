@@ -144,8 +144,16 @@ pub fn run_session(cfg: &PipelineConfig) {
         }
     };
 
+    // Log the raw transcript alongside the classifier's own argument
+    // extraction -- found live that the two can diverge (the classifier
+    // paraphrases, and voxtype's ASR mangling lives in the raw
+    // transcript, not the paraphrase), and a recovery miss is
+    // undiagnosable without seeing both. The transcript is what
+    // `looks_like_external_command` and the recovery checks below
+    // actually match on, so it's the ground truth for "why didn't the
+    // override fire".
     tracing::info!(
-        "[pipeline] intent={} argument={:?} ({:.2}s)",
+        "[pipeline] intent={} argument={:?} transcript={transcript:?} ({:.2}s)",
         result.intent,
         result.argument,
         result.latency.as_secs_f32()

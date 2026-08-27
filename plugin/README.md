@@ -127,14 +127,35 @@ models, and `config.toml` in place in case you reinstall later.
   directly with a `FileView` watcher; if a theme doesn't define
   `red`/`green`/`yellow`/`magenta`, those fall back to the bundled
   Catppuccin Mocha values.
+- **OpenClaw handoffs fail with "gateway assistant is unavailable"
+  / "can't connect to the gateway"** even though OpenClaw itself works
+  fine interactively. Check `journalctl --user -u omarchy-novad-detect`
+  for `openclaw: command not found` — `scripts/openclaw-handoff` execs
+  the bare `openclaw` command and needs it on the *systemd user
+  service's* PATH, not just an interactive shell's. This is why
+  Requirements below assumes the official installer: it places its
+  wrapper at `~/.local/bin/openclaw`, which is already on that PATH. A
+  hand-built or custom-located `openclaw` needs its own symlink into
+  `~/.local/bin` (same fix as the PATH note above for `omarchy-novad`
+  itself).
 
 ## Requirements
 
 Same as the main project: an Intel NPU/iGPU with OpenVINO GenAI, a
 build of [voxtype](https://github.com/peteonrails/voxtype) with the
-external-trigger silence-timeout fix, and (optionally) OpenClaw for the
-`EXTERNAL`/`CODING` handoff and voice conversation loop. See the main
-repo's README "Requirements" section for the full list and links.
+external-trigger silence-timeout fix, and (optionally) OpenClaw,
+installed via the official installer:
+
+```
+curl -fsSL https://openclaw.ai/install.sh | bash
+```
+
+for the `EXTERNAL`/`CODING` handoff and voice conversation loop. This
+plugin assumes that installer's default layout (its wrapper lands at
+`~/.local/bin/openclaw`, already on both the graphical shell's and the
+systemd user services' PATH) rather than symlinking a custom
+`openclaw` location itself. See the main repo's README "Requirements"
+section for the full list and links.
 
 ## Credits
 

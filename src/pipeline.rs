@@ -280,10 +280,17 @@ pub fn run_session(cfg: &PipelineConfig) {
     };
 
     if router::is_external_handoff(route_intent) {
-        // Full transcript, not route_argument -- see
+        // The full transcript, not route_argument -- see
         // router::handoff_to_openclaw's docs for why a
         // coding/reasoning handoff needs the whole utterance rather
         // than the classifier's (often keyword-stripped) extraction.
+        // But the routing preamble ("ask openclaw", "have openclaw")
+        // is stripped first -- it's addressed to the local router, not
+        // to OpenClaw, and the user wants the box to show the
+        // interpreted command, not the raw transcript. The classifier's
+        // own `argument` can't do this (observed live: it echoes the
+        // preamble back verbatim), so strip_external_preamble does it
+        // deterministically, preserving the rest word-for-word.
         //
         // Enters the full conversation loop (crate::converse) rather
         // than a one-shot handoff-and-show -- the wake word now starts
@@ -307,7 +314,8 @@ pub fn run_session(cfg: &PipelineConfig) {
             classify_model_id: cfg.classify_model_id.clone(),
             tts: cfg.tts.clone(),
         };
-        if let Err(e) = crate::converse::run(&converse_cfg, Some(transcript.clone())) {
+        let initial_utterance = router::strip_external_preamble(&transcript);
+        if let Err(e) = crate::converse::run(&converse_cfg, Some(initial_utterance)) {
             tracing::error!("[pipeline] conversation loop ended with an error: {e}");
         }
         return;

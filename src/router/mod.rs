@@ -251,6 +251,16 @@ pub fn looks_like_external_command(text: &str) -> bool {
     openclaw::looks_like_external_command(text)
 }
 
+/// Strips the "ask openclaw"/"have openclaw" routing preamble from an
+/// utterance that's been handed off to OpenClaw, leaving the actual
+/// command -- see `openclaw::strip_external_preamble`'s docs. pipeline.rs
+/// uses this on the transcript before seeding the conversation loop's
+/// first turn, so the box shows the interpreted command rather than the
+/// raw transcript with its routing preamble.
+pub fn strip_external_preamble(text: &str) -> String {
+    openclaw::strip_external_preamble(text)
+}
+
 /// Same recovery, MediaControl side -- see
 /// `media_control::looks_like_media_command`'s docs. Already used
 /// inside `route`'s own `SYSTEM_CONTROL` arm to catch the same

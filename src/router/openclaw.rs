@@ -45,6 +45,17 @@ use std::time::Duration;
 
 use tungstenite::Message;
 
+/// Words that can sit between "open" and "claw" in an ASR-mangled
+/// "openclaw" without meaning an OpenClaw command -- "open her claw" is
+/// the cat, "open the claw" is a machine part. Shared by
+/// [`looks_like_external_command`] (which decides *whether* an utterance
+/// addresses OpenClaw) and [`strip_external_preamble`] (which decides
+/// *what the user actually asked* once it does).
+const FILLER_EXCLUSIONS: &[&str] = &[
+    "her", "his", "its", "my", "your", "our", "their", "the", "a", "an", "this", "that", "these",
+    "those",
+];
+
 /// Recovery check, same shape as `bluebubbles::looks_like_message_command`
 /// / `telegram::looks_like_telegram_command`: does `text` look like it's
 /// addressing OpenClaw specifically, even through ASR noise, so
@@ -84,11 +95,8 @@ pub fn looks_like_external_command(text: &str) -> bool {
     // intervening token is only allowed when it isn't a
     // pronoun/possessive/article: "cloud" isn't one, "her" is. One
     // intervening token covers the observed case; widen if a longer
-    // insertion ever shows up live.
-    const FILLER_EXCLUSIONS: &[&str] = &[
-        "her", "his", "its", "my", "your", "our", "their", "the", "a", "an", "this", "that",
-        "these", "those",
-    ];
+    // insertion ever shows up live. (FILLER_EXCLUSIONS is module-level,
+    // shared with strip_external_preamble below.)
     let tokens: Vec<&str> = cleaned.split_whitespace().collect();
     for i in 0..tokens.len().saturating_sub(2) {
         if tokens[i] == "open" && tokens[i + 2] == "claw" && !FILLER_EXCLUSIONS.contains(&tokens[i + 1])
@@ -97,6 +105,116 @@ pub fn looks_like_external_command(text: &str) -> bool {
         }
     }
     false
+}
+
+/// Strips a leading "ask openclaw"/"have openclaw" routing preamble from
+/// `text`, leaving the actual command for the conversation loop's first
+/// turn. [`looks_like_external_command`] decides *whether* an utterance
+/// addresses OpenClaw; this decides *what the user actually asked* once
+/// it does. The classifier's own `argument` can't do this job -- observed
+/// live, it echoes the preamble back verbatim ("ask open claw what's
+/// planned for day dinner tonight?") -- so this strips the preamble
+/// deterministically instead, preserving the rest of the transcript
+/// word-for-word (original casing and punctuation).
+///
+/// Handles the same ASR manglings as [`looks_like_external_command`]:
+/// "openclaw", "open claw", and "open <word> claw" (with the same
+/// [`FILLER_EXCLUSIONS`]). The reference is only treated as a preamble
+/// when it's at the start of the utterance or preceded by a command/
+/// address verb ("ask", "have", "tell", "get", "hey", ...) -- "tell me
+/// about openclaw" and "how does openclaw work" are questions *about*
+/// OpenClaw, not routing preambles, and are left untouched. A trailing
+/// "ask openclaw" afterthought ("What's the status with Home Assistant?
+/// Ask OpenClaw.") is stripped too, since the reference is still
+/// preceded by a command verb.
+pub fn strip_external_preamble(text: &str) -> String {
+    let words: Vec<&str> = text.split_whitespace().collect();
+    if words.is_empty() {
+        return text.to_string();
+    }
+
+    // Lowercased, punctuation-stripped view of each word for matching --
+    // same normalization `looks_like_external_command` uses.
+    let cleaned: Vec<String> = words
+        .iter()
+        .map(|w| {
+            w.to_lowercase()
+                .chars()
+                .filter(|c| c.is_alphanumeric())
+                .collect()
+        })
+        .collect();
+
+    // Locate the OpenClaw reference as a [start, end) word span: a single
+    // "openclaw" word, or an "open claw" / "open <word> claw" sequence.
+    let mut ref_span: Option<(usize, usize)> = None;
+    for (i, w) in cleaned.iter().enumerate() {
+        if w == "openclaw" {
+            ref_span = Some((i, i + 1));
+            break;
+        }
+    }
+    if ref_span.is_none() {
+        for i in 0..cleaned.len().saturating_sub(1) {
+            if cleaned[i] == "open" && cleaned[i + 1] == "claw" {
+                ref_span = Some((i, i + 2));
+                break;
+            }
+        }
+    }
+    if ref_span.is_none() {
+        for i in 0..cleaned.len().saturating_sub(2) {
+            if cleaned[i] == "open"
+                && cleaned[i + 2] == "claw"
+                && !FILLER_EXCLUSIONS.contains(&cleaned[i + 1].as_str())
+            {
+                ref_span = Some((i, i + 3));
+                break;
+            }
+        }
+    }
+    let Some((ref_start, ref_end)) = ref_span else {
+        return text.to_string();
+    };
+
+    // Expand the span backward over command/address verbs ("ask
+    // openclaw", "please have openclaw", ...).
+    const ROUTING_VERBS: &[&str] = &["ask", "have", "tell", "get", "hey", "hi", "yo", "please"];
+    let mut span_start = ref_start;
+    while span_start > 0 && ROUTING_VERBS.contains(&cleaned[span_start - 1].as_str()) {
+        span_start -= 1;
+    }
+
+    // Only a routing preamble gets stripped: the reference at the very
+    // start, or preceded by a command/address verb. Anything else is a
+    // question *about* OpenClaw and stays as-is.
+    let is_preamble = ref_start == 0 || span_start < ref_start;
+    if !is_preamble {
+        return text.to_string();
+    }
+
+    // Expand the span forward over connector words ("ask openclaw to
+    // give status" → "give status").
+    const CONNECTORS: &[&str] = &[
+        "to", "please", "can", "could", "would", "will", "you", "do", "does", "did", "may",
+        "might", "shall", "should",
+    ];
+    let mut span_end = ref_end;
+    while span_end < words.len() && CONNECTORS.contains(&cleaned[span_end].as_str()) {
+        span_end += 1;
+    }
+
+    // The preamble covers the whole utterance ("ask openclaw" alone) --
+    // keep the original rather than returning an empty string.
+    if span_start == 0 && span_end >= words.len() {
+        return text.to_string();
+    }
+
+    // Reassemble: words before the span + words after it.
+    let mut result = Vec::new();
+    result.extend_from_slice(&words[..span_start]);
+    result.extend_from_slice(&words[span_end..]);
+    result.join(" ")
 }
 
 /// All wake-word-triggered handoffs share one conversation so OpenClaw
@@ -701,7 +819,7 @@ fn pane_shows(pane_id: &str, needle: &str) -> bool {
 mod tests {
     use super::{
         base64_url_no_pad, build_device_auth_payload_v3, looks_like_external_command,
-        normalize_device_metadata,
+        normalize_device_metadata, strip_external_preamble,
     };
 
     #[test]
@@ -770,6 +888,85 @@ mod tests {
             "remind me to buy a new cat scratching post because the cat likes to open her claw \
              on the couch"
         ));
+    }
+
+    #[test]
+    fn strips_a_leading_ask_openclaw_preamble() {
+        assert_eq!(
+            strip_external_preamble("ask openclaw to give status on home assistant"),
+            "give status on home assistant"
+        );
+        assert_eq!(
+            strip_external_preamble("Ask OpenClaw what's the status with Home Assistant."),
+            "what's the status with Home Assistant."
+        );
+        assert_eq!(
+            strip_external_preamble("have openclaw check the weather"),
+            "check the weather"
+        );
+        assert_eq!(
+            strip_external_preamble("hey openclaw, write a python script"),
+            "write a python script"
+        );
+        assert_eq!(
+            strip_external_preamble("please ask openclaw to fix the photo frame"),
+            "fix the photo frame"
+        );
+    }
+
+    #[test]
+    fn strips_the_asr_mangled_preamble_too() {
+        // Same live mishearings looks_like_external_command catches.
+        assert_eq!(
+            strip_external_preamble("ask open cloud claw to give it a status on the home assistant"),
+            "give it a status on the home assistant"
+        );
+        assert_eq!(
+            strip_external_preamble("Ask open. Claw. what photo is on the photo frame"),
+            "what photo is on the photo frame"
+        );
+    }
+
+    #[test]
+    fn strips_a_trailing_ask_openclaw_afterthought() {
+        // Observed live: "What's the status with Home Assistant? Ask
+        // OpenClaw." -- the reference is a trailing afterthought, still
+        // preceded by a command verb, so it gets stripped too.
+        assert_eq!(
+            strip_external_preamble("What's the status with Home Assistant? Ask OpenClaw."),
+            "What's the status with Home Assistant?"
+        );
+    }
+
+    #[test]
+    fn leaves_questions_about_openclaw_alone() {
+        // "tell me about openclaw" / "how does openclaw work" are
+        // questions *about* OpenClaw, not routing preambles -- the
+        // reference isn't preceded by a command/address verb, so the
+        // utterance is left untouched.
+        assert_eq!(
+            strip_external_preamble("tell me about openclaw"),
+            "tell me about openclaw"
+        );
+        assert_eq!(
+            strip_external_preamble("how does openclaw work"),
+            "how does openclaw work"
+        );
+    }
+
+    #[test]
+    fn leaves_text_without_a_preamble_alone() {
+        assert_eq!(
+            strip_external_preamble("turn on the living room lights"),
+            "turn on the living room lights"
+        );
+        assert_eq!(strip_external_preamble(""), "");
+        // "ask openclaw" alone has nothing left after the preamble --
+        // keep the original rather than returning an empty string.
+        assert_eq!(
+            strip_external_preamble("ask openclaw"),
+            "ask openclaw"
+        );
     }
 
     #[test]

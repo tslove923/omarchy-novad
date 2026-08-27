@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "id": "io.github.tslove923.omarchy-novad",
+  "name": "omarchy-novad",
+  "version": "0.1.0",
+  "author": "tslove923",
+  "license": "MIT",
+  "description": "NPU-accelerated wake-word voice assistant: dictation review/command confirmation popup, an OpenClaw conversation transcript, and an at-a-glance bar status for the omarchy-novad daemon.",
+  "kinds": ["service", "bar-widget", "overlay"],
+  "keepLoaded": true,
+  "entryPoints": {
+    "service": "Service.qml",
+    "barWidget": "BarWidget.qml",
+    "overlay": "Overlay.qml"
+  },
+  "barWidget": {
+    "displayName": "omarchy-novad",
+    "description": "Wake-word assistant status: current phase, pending confirmation, and a quick stop for the OpenClaw conversation loop.",
+    "category": "AI",
+    "allowMultiple": false,
+    "defaultSection": "right"
+  }
+}

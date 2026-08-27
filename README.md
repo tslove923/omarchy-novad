@@ -19,8 +19,10 @@ detection, dictation via [voxtype](https://github.com/peteonrails/voxtype)
 classification, a scoped command router (app launch, web search/open,
 volume/brightness, MPRIS media control, Home Assistant, BlueBubbles
 messaging, sandboxed terminal commands), and OpenClaw handoff for
-anything else. Not yet a real Omarchy shell plugin — see
-[Roadmap](#roadmap).
+anything else. Also packaged as a real Omarchy shell plugin — see
+[`plugin/`](plugin/) (its own README covers install/setup; the
+standalone `qs -p quickshell` workflow below still works independently
+for local dev/testing).
 
 ## Architecture
 
@@ -33,7 +35,8 @@ anything else. Not yet a real Omarchy shell plugin — see
 | `src/config.rs` | Persistent config file (`~/.config/omarchy-novad/config.toml`) — see [Configuration](#configuration) |
 | `src/popup/` | Popup state machine + Unix-socket control channel; also where the confirm/approve round-trip lives (`PopupPhase::Confirming`, `PopupAction::Approve`/`Deny`) for anything that shouldn't execute straight from a voice command — see [Confirmation flow](#confirmation-flow) |
 | `omarchy-novad serve` | Hosts a local OpenVINO GenAI model behind an OpenAI-compatible `/v1/chat/completions` API — this is what `classify` talks to |
-| `quickshell/` | The popup UI (Quickshell/QML), themed live from `~/.local/state/omarchy/current/theme/colors.toml` |
+| `quickshell/` | Standalone dev/test UI (Quickshell/QML), run via `qs -p quickshell`, themed live from `~/.local/state/omarchy/current/theme/colors.toml` |
+| `plugin/` | The same UI ported onto the real Omarchy shell plugin contract (`service`/`bar-widget`/`overlay`), plus systemd `--user` units + a `setup`/`remove` script pair for the daemon itself — see [`plugin/README.md`](plugin/README.md) |
 
 Two triggers are supported for what a detected wake word does
 (`--on-detect`):
@@ -179,14 +182,19 @@ api_hash = "..."
 
 [openclaw]
 # approve_device_command = "ssh admin-host \"kubectl exec -n openclaw deploy/openclaw -- openclaw devices approve --latest\""
+
+[tts]
+# serve_url = "http://127.0.0.1:8421"
+# voice = "af_nova"
 ```
 
 See [Home Assistant setup](#home-assistant-setup),
 [BlueBubbles setup](#bluebubbles-setup),
 [Telegram setup](#telegram-setup),
-[OmaPilot integration](#omapilot-integration), and
-[OpenClaw setup](#openclaw-setup) below for what each section
-actually needs.
+[OmaPilot integration](#omapilot-integration),
+[OpenClaw setup](#openclaw-setup), and
+[OpenClaw voice conversation](#openclaw-voice-conversation-converse)
+below for what each section actually needs.
 
 ## Home Assistant setup
 
@@ -399,8 +407,13 @@ openclaw-handoff "reply with the single word PING and nothing else" "smoke-test"
 ```
 
 Then say the wake word and something open-ended ("what's the capital
-of France", "write a python script to sort a list") — the popup
-should show "Asking OpenClaw…" and come back with a real answer.
+of France", "write a python script to sort a list") — this now enters
+the full conversation loop (see [OpenClaw voice
+conversation](#openclaw-voice-conversation-converse) below) rather
+than a one-shot exchange: it'll confirm what it heard, hand off to
+OpenClaw, show the full reply in the conversation window, speak a
+summary, and keep listening for your next turn until you say a stop
+phrase or run `omarchy-novad converse stop`.
 
 ### Continuing a conversation in Herdr
 
@@ -441,6 +454,112 @@ approve_device_command = "ssh admin-host \"kubectl exec -n openclaw deploy/openc
 `openclaw devices approve <id>` command to actually approve it — if
 your gateway needs the two-step dance rather than one-shot approval,
 write that into `approve_device_command` instead.
+
+## OpenClaw voice conversation (`converse`)
+
+This is what actually runs a genuine spoken back-and-forth with
+OpenClaw — and, since it's the default handler for
+`Intent::External`/`Intent::Coding`, it's what the automatic wake-word
+path enters too the moment you say something open-ended (see
+[Verify](#verify) above), not just a manually-run mode. It listens
+(reusing the same voxtype record/transcribe round-trip the wake-word
+pipeline uses), confirms what it heard, hands the utterance to
+OpenClaw (`router::handoff_external`, same `agent:main:novad:voice`
+session the plain one-shot handoff used to use — so context carries
+over the same way), shows OpenClaw's *full* reply in a dedicated
+Quickshell window (`quickshell/OpenClawConversation.qml`), speaks a
+shorter conversational summary of it out loud, then listens again —
+looping until you say a stop phrase ("stop conversation", "end
+conversation", "goodbye jarvis") or run `omarchy-novad converse stop`
+from another terminal. `omarchy-novad converse start` runs the exact
+same loop by hand, without needing to say the wake word first —
+useful for testing, or starting a conversation from a script/keybind.
+
+### Binding it to a keybind
+
+Since `converse start` runs in the background and drives the
+conversation window/TTS on its own, it's a plain fire-and-forget exec
+-- no terminal needed. On Omarchy's Lua-based Hyprland config
+(`~/.config/hypr/bindings.lua`), add it the same way the existing
+`novad respond insert`/`novad respond cancel` bindings there work:
+
+```lua
+-- Start an OpenClaw voice conversation without needing the wake word.
+o.bind("SUPER + J", "Start OpenClaw conversation", "omarchy-novad converse start")
+```
+
+Plain Hyprland (`bind = ` syntax in `hyprland.conf`/`bindings.conf`)
+looks like:
+
+```
+bind = SUPER, J, exec, omarchy-novad converse start
+```
+
+Pick any key combo that isn't already bound — `hyprctl binds` (or
+Omarchy's own bindings list) shows what's already taken.
+
+Deliberately OpenClaw-only, no `[omapilot] fallback` here: OmaPilot's
+`askText` handoff never returns a real reply (see
+[OmaPilot integration](#omapilot-integration)'s `askText` discussion),
+so it has no way to power a conversation loop even in principle.
+OmaPilot is still reachable via its own `direct_target`/
+`direct_target_prefix` trigger ("hey jarvis, pilot: ...", see
+[Configuration](#configuration)), which bypasses classification
+(and this whole conversation flow) entirely, same as before.
+
+```bash
+omarchy-novad converse start
+# ... talk back and forth ...
+omarchy-novad converse stop   # or Ctrl+C the running process
+```
+
+Point `detect --on-detect` (or `[detect] on_detect` in config.toml) at
+`omarchy-novad converse start` to trigger it hands-free from the wake
+word instead of typing it.
+
+### How the spoken summary is derived
+
+OpenClaw's replies are often long/technical — not what you want read
+aloud verbatim. Each reply is condensed to 1-3 short spoken sentences
+via a second call to the same local LLM `omarchy-novad serve` already
+runs for classification (`[tts] `'s config doesn't need its own model —
+`--classify-base-url`/`--classify-model-id` on `converse start` point
+at the existing serve instance, same defaults as `detect`). If that
+summarization call fails for any reason, the full reply is spoken
+verbatim instead — a slower fallback, never silence.
+
+### TTS backend (Kokoro, CPU)
+
+Speech synthesis is [Kokoro](https://github.com/hexgrad/kokoro) (an
+82M-parameter model) run via `onnxruntime`'s CPU execution provider, in
+a small standalone Python server — see `tts-prototype/README.md` for
+how to install and run it (`tts-prototype/server.py`, one-time `uv`
+setup, then a long-running process just like `omarchy-novad serve`;
+`converse` only ever talks to it over HTTP, same relationship
+`classify` has to the LLM serve instance). GPU/NPU acceleration was
+investigated and abandoned for this model: OpenVINO's GPU plugin fails
+to compile Kokoro's ONNX graph outright (a dynamic-rank limitation in
+its harmonic-source vocoder component — confirmed a systemic
+architecture incompatibility, not a fixable one-off bug), and no
+working Intel NPU path exists anywhere in the Kokoro ecosystem today.
+CPU alone measures ~0.3x real-time, which can't synthesize a whole
+10-20s reply in under a second — but `converse` never needs to: it
+synthesizes and speaks sentence-by-sentence, so the *first* sentence
+(the only one perceived latency depends on) is ready in well under a
+second, with every later sentence's synthesis overlapping the previous
+one's playback (validated in `tts-prototype/stream_demo.py`: ~0.7s to
+first audio, zero gaps for the rest of a 17s response).
+
+```toml
+[tts]
+# serve_url = "http://127.0.0.1:8421"
+# voice = "af_nova"
+```
+
+`voice` is any id from Kokoro's v1.0 voice pack (see
+`tts-prototype/README.md` for the full list — English options include
+`af_nova`, `af_bella`, `af_sky`, `am_adam`, `am_michael`, `bf_emma`,
+and more).
 
 ## OmaPilot integration
 
@@ -573,16 +692,14 @@ prompt in `src/classify/mod.rs`.
 
 ## Roadmap
 
-- **Real Omarchy shell plugin.** Today the popup is a standalone
-  `qs -p quickshell` process this daemon spawns itself — not a plugin
-  the Omarchy shell discovers and loads via its own plugin registry.
-  Getting there means a `manifest.json` (schemaVersion, id, declared
-  `kinds`, matching `entryPoints`), restructuring the popup as a
-  loadable `overlay` entry point (and possibly a `bar-widget` for an
-  idle/listening status indicator), and moving control from this
-  daemon's own `qs -p` invocation into the shell's plugin lifecycle.
-  Run `omarchy plugin validate <folder>` against whatever's built to
-  confirm it actually passes the schema the shell enforces.
+- **~~Real Omarchy shell plugin.~~ Done — see [`plugin/`](plugin/).**
+  `manifest.json` declares `service`/`bar-widget`/`overlay` kinds; the
+  popup and OpenClaw transcript are ported onto the `overlay` entry
+  point (host-injected `Item`s instead of this daemon's own `qs -p`
+  process), a `Service.qml` owns the shared state, and a small
+  `BarWidget.qml` gives an at-a-glance status indicator. Passes
+  `omarchy plugin validate plugin/`. Not yet published/hosted anywhere
+  `omarchy plugin add` can reach — that's a separate step.
 - **Config menu.** `config.toml` (see [Configuration](#configuration))
   covers everything now, but only as a text file — a Quickshell-based
   settings UI (wake word, classify model, Home Assistant/BlueBubbles

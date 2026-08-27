@@ -43,6 +43,33 @@ use std::io::Write;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
+/// Recovery check, same shape as `bluebubbles::looks_like_message_command`
+/// / `telegram::looks_like_telegram_command`: does `text` look like it's
+/// addressing OpenClaw specifically, even through ASR noise, so
+/// `pipeline.rs` can recover a misclassified MEMORY_RETURN back into
+/// `Intent::External`? Observed live: voxtype transcribed "...ask
+/// openclaw what..." as "Ask open. Claw. what..." -- a stray sentence
+/// break inserted mid-word -- which the classifier read as MEMORY_RETURN
+/// since punctuation-mangled "open. claw." doesn't visually resemble its
+/// own name. Strips punctuation first so that exact case is caught, and
+/// checks a leading window of words rather than requiring the trigger to
+/// be literally the first word -- unlike "text"/"message", people
+/// naturally lead with a verb ("ask openclaw...", "tell openclaw...",
+/// "hey openclaw...") rather than putting "openclaw" itself first.
+pub fn looks_like_external_command(text: &str) -> bool {
+    let cleaned: String = text
+        .to_lowercase()
+        .chars()
+        .filter(|c| c.is_alphanumeric() || c.is_whitespace())
+        .collect();
+    let leading = cleaned
+        .split_whitespace()
+        .take(6)
+        .collect::<Vec<_>>()
+        .join(" ");
+    leading.contains("openclaw") || leading.contains("open claw")
+}
+
 /// Generous timeout for one handoff round-trip. OpenClaw runs a real
 /// agent turn (can involve tool calls, web fetches, etc.), not a
 /// single classify-sized LLM call -- the ~10s PING smoke test was the
@@ -347,5 +374,48 @@ fn pane_shows(pane_id: &str, needle: &str) -> bool {
             tracing::warn!("[router:openclaw] herdr pane read failed: {e}");
             false
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::looks_like_external_command;
+
+    #[test]
+    fn catches_the_actual_live_mishearing() {
+        // Observed live: voxtype transcribed this exact utterance, and
+        // the classifier read it as MEMORY_RETURN.
+        assert!(looks_like_external_command(
+            "Ask open. Claw. what photo is on the photo frame right now When and where was it \
+             taken and who is in it?"
+        ));
+    }
+
+    #[test]
+    fn catches_common_phrasings() {
+        assert!(looks_like_external_command("openclaw what's the capital of France"));
+        assert!(looks_like_external_command("ask openclaw to write a python script"));
+        assert!(looks_like_external_command("hey openclaw, check the cluster"));
+        assert!(looks_like_external_command("tell open claw to check the logs"));
+    }
+
+    #[test]
+    fn does_not_fire_on_unrelated_text() {
+        assert!(!looks_like_external_command("turn on the living room lights"));
+        assert!(!looks_like_external_command("text mom I'm running late"));
+        assert!(!looks_like_external_command(
+            "what's the weather like today"
+        ));
+    }
+
+    #[test]
+    fn does_not_fire_when_the_words_only_appear_much_later() {
+        // A long transcript that happens to mention "open" and "claw"
+        // unrelatedly, far past the leading-word window, shouldn't
+        // false-positive as an OpenClaw command.
+        assert!(!looks_like_external_command(
+            "remind me to buy a new cat scratching post because the cat likes to open her claw \
+             on the couch"
+        ));
     }
 }

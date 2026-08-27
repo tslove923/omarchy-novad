@@ -60,6 +60,12 @@ pub struct PipelineConfig {
     /// checked, and `Intent::External`/`Coding`'s handoff only ever
     /// tries OpenClaw. See `router::omapilot`.
     pub omapilot: Option<OmaPilotConfig>,
+    /// Voice/model for `crate::converse`'s TTS playback -- see that
+    /// module's docs. Used whenever `Intent::External`/`Coding`
+    /// hands off to OpenClaw: see this file's `is_external_handoff`
+    /// branch, which now enters the full conversation loop rather
+    /// than a one-shot handoff.
+    pub tts: crate::config::TtsConfig,
 }
 
 /// Run one full session after a wake-word detection: start voxtype
@@ -77,31 +83,14 @@ pub fn run_session(cfg: &PipelineConfig) {
         editable: false,
     });
 
-    if let Err(e) = start_recording(cfg) {
-        tracing::error!("[pipeline] failed to start recording: {e}");
-        popup::write_state(&PopupState::default());
-        return;
-    }
-
-    if !wait_for_recording_to_start(cfg) {
-        tracing::warn!("[pipeline] voxtype never left idle after record start -- giving up");
-        popup::write_state(&PopupState::default());
-        return;
-    }
-
-    if !wait_for_idle(cfg) {
-        tracing::warn!("[pipeline] session timed out waiting for voxtype to return to idle");
-        popup::write_state(&PopupState::default());
-        return;
-    }
-
-    let transcript = match std::fs::read_to_string(&cfg.transcript_path) {
-        Ok(s) => s.trim().to_string(),
+    let transcript = match listen_and_transcribe(
+        &cfg.voxtype_binary,
+        &cfg.transcript_path,
+        &cfg.voxtype_state_path,
+    ) {
+        Ok(t) => t,
         Err(e) => {
-            tracing::error!(
-                "[pipeline] failed to read transcript at {:?}: {e}",
-                cfg.transcript_path
-            );
+            tracing::error!("[pipeline] {e}");
             popup::write_state(&PopupState::default());
             return;
         }
@@ -162,38 +151,40 @@ pub fn run_session(cfg: &PipelineConfig) {
         result.latency.as_secs_f32()
     );
 
-    if router::is_external_handoff(result.intent) {
-        // Full transcript, not result.argument -- see
-        // router::handoff_to_openclaw's docs for why a
-        // coding/reasoning handoff needs the whole utterance rather
-        // than the classifier's (often keyword-stripped) extraction.
-        popup::write_state(&PopupState {
-            phase: PopupPhase::HandingOff,
-            text: transcript.clone(),
-            confirm_label: None,
-            editable: false,
-        });
-        let (success, message) = router::handoff_external(&transcript, cfg.omapilot.as_ref());
-        tracing::info!("[pipeline] external handoff: success={success} message={message:?}");
-        show_ready_and_wait(&message);
-        return;
-    }
-
     // Recovery: MEMORY_RETURN has no local handler (see router::route's
     // doc comment), so it's a safe bucket to double-check rather than a
     // risk of overriding a confident, actionable classification. If the
-    // *original* transcript's leading word looks like a MESSAGE or
-    // TELEGRAM trigger verb -- including a plausible ASR mis-hearing,
-    // e.g. "tax" for "text" (observed live: "text Jessica is this
-    // working?" came back transcribed as "Tax is this working.", which
-    // the classifier had no reason to read as anything but
-    // MEMORY_RETURN) -- route the full transcript instead of the
-    // classifier's own argument extraction, which had already lost
-    // whatever didn't survive transcription. See
-    // router::looks_like_message_command / looks_like_telegram_command's
-    // docs. Checked in this order (Message before Telegram) only because
-    // Message was the one actually observed misfiring live; the trigger
-    // word sets don't overlap so the order otherwise doesn't matter.
+    // *original* transcript's leading word(s) look like a MESSAGE,
+    // TELEGRAM, or OpenClaw trigger -- including a plausible ASR
+    // mis-hearing, e.g. "tax" for "text" (observed live: "text Jessica
+    // is this working?" came back transcribed as "Tax is this
+    // working.", which the classifier had no reason to read as anything
+    // but MEMORY_RETURN), or "Ask open. Claw. what..." for "ask
+    // openclaw what..." (a stray sentence-break inserted mid-word) --
+    // route the full transcript instead of the classifier's own
+    // argument extraction, which had already lost whatever didn't
+    // survive transcription. Five checks total: Message, Telegram,
+    // OpenClaw (see router::looks_like_message_command /
+    // looks_like_telegram_command / looks_like_external_command's
+    // docs), plus MediaControl/HomeAssistant (reusing the exact
+    // checkers route()'s own SYSTEM_CONTROL arm already uses one level
+    // down for the same confusion -- see
+    // router::looks_like_media_command / looks_like_home_assistant_command).
+    // Checked in this order only because Message was the one actually
+    // observed misfiring live first; the trigger word sets don't
+    // overlap so the order otherwise doesn't matter. Deliberately
+    // does NOT attempt every intent -- OpenApp/WebSearch/OpenWebsite/
+    // Terminal have no equivalent checker because none has an observed
+    // live misclassification to model one on; every checker in this
+    // codebase is built from a specific real failure, not a guess at a
+    // hypothetical one (see e.g. the Levenshtein comment in
+    // bluebubbles.rs), since an unvalidated heuristic risks recovering
+    // an already-correct MEMORY_RETURN into the wrong intent instead.
+    //
+    // This has to happen before `is_external_handoff` below, not after
+    // -- Coding/External never go through `route()` at all, so a
+    // recovery into `Intent::External` needs to reach that check, not
+    // this one's `route()` call.
     let (route_intent, route_argument) = if result.intent == Intent::MemoryReturn
         && cfg.bluebubbles.is_some()
         && router::looks_like_message_command(&transcript)
@@ -212,9 +203,84 @@ pub fn run_session(cfg: &PipelineConfig) {
              like a mis-heard telegram trigger): {transcript:?}"
         );
         (Intent::Telegram, transcript.clone())
+    } else if result.intent == Intent::MemoryReturn && router::looks_like_external_command(&transcript)
+    {
+        tracing::info!(
+            "[pipeline] recovering misclassified MEMORY_RETURN as EXTERNAL (leading words look \
+             like a mis-heard OpenClaw trigger): {transcript:?}"
+        );
+        (Intent::External, transcript.clone())
+    } else if result.intent == Intent::MemoryReturn && router::looks_like_media_command(&transcript) {
+        // Reuses the same checker route()'s own SYSTEM_CONTROL arm
+        // already uses one level down -- extended here so it also
+        // catches the case where the classifier missed it entirely
+        // (MEMORY_RETURN) rather than only the SYSTEM_CONTROL/MEDIA_CONTROL
+        // mix-up that arm was built for.
+        tracing::info!(
+            "[pipeline] recovering misclassified MEMORY_RETURN as MEDIA_CONTROL (leading word \
+             looks like a media transport command): {transcript:?}"
+        );
+        (Intent::MediaControl, transcript.clone())
+    } else if result.intent == Intent::MemoryReturn
+        && cfg.home_assistant.is_some()
+        && router::looks_like_home_assistant_command(&transcript)
+    {
+        // Same reuse, Home Assistant side -- guarded on `home_assistant`
+        // being configured for the same reason route()'s own check is:
+        // don't claim a false "Home Assistant not configured" for a
+        // phrase that only coincidentally shares a verb.
+        tracing::info!(
+            "[pipeline] recovering misclassified MEMORY_RETURN as HOME_ASSISTANT (leading word \
+             looks like a device-control command): {transcript:?}"
+        );
+        (Intent::HomeAssistant, transcript.clone())
+    } else if result.intent == Intent::MemoryReturn {
+        // MEMORY_RETURN has no local handler -- there's no recall/notes
+        // feature backing it, so it always fell through to
+        // RouteResult::Unhandled's silent 4s transcript flash regardless
+        // of what recovery checks above matched. Rather than a dead-end
+        // intent, treat every MEMORY_RETURN as a request for OpenClaw:
+        // it's a strictly better fallback than a no-op flash, and the
+        // recovery checks above already skim off the cases that clearly
+        // belong to a *different* local handler first.
+        (Intent::External, transcript.clone())
     } else {
         (result.intent, result.argument.clone())
     };
+
+    if router::is_external_handoff(route_intent) {
+        // Full transcript, not route_argument -- see
+        // router::handoff_to_openclaw's docs for why a
+        // coding/reasoning handoff needs the whole utterance rather
+        // than the classifier's (often keyword-stripped) extraction.
+        //
+        // Enters the full conversation loop (crate::converse) rather
+        // than a one-shot handoff-and-show -- the wake word now starts
+        // a back-and-forth with OpenClaw instead of a single exchange;
+        // subsequent turns keep listening without needing the wake
+        // word again, until a stop phrase or `converse stop`. This
+        // path is deliberately OpenClaw-only, no `[omapilot] fallback`
+        // -- OmaPilot's `askText` handoff never returns a real reply
+        // (see router::omapilot's docs), so it has no way to power a
+        // conversation loop even in principle; OmaPilot is still
+        // reachable via its own `direct_target`/`direct_target_prefix`
+        // trigger (checked above, before classification), unaffected
+        // by this.
+        tracing::info!("[pipeline] external/coding request -- entering the conversation loop");
+        popup::write_state(&PopupState::default());
+        let converse_cfg = crate::converse::ConverseConfig {
+            voxtype_binary: cfg.voxtype_binary.clone(),
+            transcript_path: cfg.transcript_path.clone(),
+            voxtype_state_path: cfg.voxtype_state_path.clone(),
+            classify_base_url: cfg.classify_base_url.clone(),
+            classify_model_id: cfg.classify_model_id.clone(),
+            tts: cfg.tts.clone(),
+        };
+        if let Err(e) = crate::converse::run(&converse_cfg, Some(transcript.clone())) {
+            tracing::error!("[pipeline] conversation loop ended with an error: {e}");
+        }
+        return;
+    }
 
     match router::route(
         route_intent,
@@ -281,14 +347,44 @@ pub fn run_session(cfg: &PipelineConfig) {
     }
 }
 
-fn start_recording(cfg: &PipelineConfig) -> std::io::Result<()> {
+/// Runs one voxtype record+transcribe round-trip and returns the
+/// resulting transcript, trimmed (empty means nothing was said --
+/// callers decide whether that's "try again" or "give up," same as
+/// `run_session` treating it as "nothing to do"). Factored out of
+/// `run_session` so a caller that needs more than one turn (see
+/// `crate::converse`'s multi-turn loop) can call this again for each
+/// follow-up reply without going through classify/route at all.
+pub fn listen_and_transcribe(
+    voxtype_binary: &str,
+    transcript_path: &std::path::Path,
+    voxtype_state_path: &std::path::Path,
+) -> anyhow::Result<String> {
+    start_recording(voxtype_binary, transcript_path)
+        .map_err(|e| anyhow::anyhow!("failed to start recording: {e}"))?;
+
+    if !wait_for_recording_to_start(voxtype_state_path) {
+        anyhow::bail!("voxtype never left idle after record start -- giving up");
+    }
+    if !wait_for_idle(voxtype_state_path) {
+        anyhow::bail!("session timed out waiting for voxtype to return to idle");
+    }
+
+    let transcript = std::fs::read_to_string(transcript_path)
+        .map_err(|e| anyhow::anyhow!("failed to read transcript at {transcript_path:?}: {e}"))?;
+    Ok(transcript.trim().to_string())
+}
+
+fn start_recording(
+    voxtype_binary: &str,
+    transcript_path: &std::path::Path,
+) -> std::io::Result<()> {
     // Best-effort: stale content from a previous session shouldn't be
     // mistaken for this one's transcript if voxtype fails to write a
     // fresh one for some reason.
-    let _ = std::fs::remove_file(&cfg.transcript_path);
+    let _ = std::fs::remove_file(transcript_path);
 
-    let file_arg = format!("--file={}", cfg.transcript_path.display());
-    let status = std::process::Command::new(&cfg.voxtype_binary)
+    let file_arg = format!("--file={}", transcript_path.display());
+    let status = std::process::Command::new(voxtype_binary)
         .args(["record", "start", &file_arg])
         .status()?;
     if !status.success() {
@@ -309,13 +405,13 @@ fn start_recording(cfg: &PipelineConfig) -> std::io::Result<()> {
 /// finished -- exactly what happened in the first live test: the
 /// pipeline read a nonexistent transcript file a few milliseconds
 /// after telling voxtype to start.
-fn wait_for_recording_to_start(cfg: &PipelineConfig) -> bool {
+fn wait_for_recording_to_start(voxtype_state_path: &std::path::Path) -> bool {
     let start = Instant::now();
     loop {
         if start.elapsed() >= SESSION_TIMEOUT {
             return false;
         }
-        match std::fs::read_to_string(&cfg.voxtype_state_path) {
+        match std::fs::read_to_string(voxtype_state_path) {
             Ok(s) if s.trim() != "idle" => return true,
             _ => std::thread::sleep(POLL_INTERVAL),
         }
@@ -328,13 +424,13 @@ fn wait_for_recording_to_start(cfg: &PipelineConfig) -> bool {
 /// `wait_for_recording_to_start` has confirmed the session is
 /// actually underway -- see that function's docs for why calling this
 /// alone right after `record start` is a race.
-fn wait_for_idle(cfg: &PipelineConfig) -> bool {
+fn wait_for_idle(voxtype_state_path: &std::path::Path) -> bool {
     let start = Instant::now();
     loop {
         if start.elapsed() >= SESSION_TIMEOUT {
             return false;
         }
-        match std::fs::read_to_string(&cfg.voxtype_state_path) {
+        match std::fs::read_to_string(voxtype_state_path) {
             Ok(s) if s.trim() == "idle" => return true,
             _ => std::thread::sleep(POLL_INTERVAL),
         }

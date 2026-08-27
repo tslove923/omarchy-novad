@@ -1,0 +1,12 @@
+# Model weights -- large binary downloads, not source. See README.md's
+# Setup section for where to fetch them.
+*.onnx
+*.bin
+
+# Python/uv environment and caches.
+.venv/
+__pycache__/
+*.pyc
+
+# Test/scratch audio output.
+output*.wav

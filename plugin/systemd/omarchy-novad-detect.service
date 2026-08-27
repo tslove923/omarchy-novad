@@ -1,0 +1,33 @@
+[Unit]
+Description=omarchy-novad wake-word listener
+Documentation=https://github.com/tslove923/omarchy-novad
+# Needs the classifier already answering (see omarchy-novad-serve.service)
+# and a running graphical session for the popup/overlay plugin to draw
+# into and for the mic/NPU to be reachable.
+After=graphical-session.target omarchy-novad-serve.service
+Wants=omarchy-novad-serve.service
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+# tracing::info!/warn!/error! are otherwise invisible in `journalctl
+# --user -u omarchy-novad-detect` -- this was a repeated blind spot
+# debugging wake-word/handoff issues live. debug/trace stays opt-in
+# (voice transcripts at that level) but info is safe and worth having
+# on by default.
+Environment=RUST_LOG=info
+# @NOVAD_BIN@ is substituted by ./setup at install time. No other
+# flags are passed on purpose: `omarchy-novad detect` reads
+# ~/.config/omarchy-novad/config.toml's [detect] section itself, and
+# an explicit flag only overrides the config file when it differs from
+# the flag's own hardcoded default (see src/config.rs's resolve_str) --
+# so passing the defaults here instead of leaving them off would
+# actually make this unit *ignore* a wakeword/device override the user
+# put in config.toml. Edit config.toml, not this file, to change
+# wakeword/device/on-detect/classify target.
+ExecStart=@NOVAD_BIN@ detect
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target

@@ -1,9 +1,12 @@
 mod classify;
 mod config;
+mod conversation;
+mod converse;
 mod pipeline;
 mod popup;
 mod router;
 mod serve;
+mod tts;
 mod wake;
 
 use std::sync::mpsc;
@@ -167,6 +170,15 @@ enum Command {
         #[command(subcommand)]
         what: OpenclawCommand,
     },
+
+    /// Multi-turn spoken conversation with OpenClaw -- see
+    /// `converse`'s module docs. Runs in the foreground until stopped;
+    /// point `detect --on-detect` at `omarchy-novad converse start` to
+    /// trigger it hands-free from the wake word.
+    Converse {
+        #[command(subcommand)]
+        what: ConverseCommand,
+    },
 }
 
 #[derive(Subcommand)]
@@ -193,6 +205,51 @@ enum OpenclawCommand {
     /// separate from that automatic handoff. See
     /// `router::openclaw::continue_in_herdr`'s doc comment for why.
     ContinueInHerdr,
+}
+
+#[derive(Subcommand)]
+enum ConverseCommand {
+    /// Start the loop: listen, hand off to OpenClaw, show + speak the
+    /// reply, listen for the follow-up, repeat until stopped (`converse
+    /// stop`, or a spoken stop phrase -- see `converse::STOP_PHRASES`).
+    Start {
+        /// Skip the first listen and hand this off immediately -- e.g.
+        /// from a wake-word trigger that already captured an utterance.
+        #[arg(long)]
+        text: Option<String>,
+        #[arg(long, default_value = "http://127.0.0.1:8420")]
+        classify_base_url: String,
+        #[arg(long, default_value = "qwen3-1.7b-instruct")]
+        classify_model_id: String,
+    },
+    /// End a running `converse start` loop after its current turn.
+    Stop,
+    /// Answer a pending "does this look good?" prompt with yes --
+    /// called by the conversation window's edit box on Enter (with
+    /// `--text` set to whatever's in the box) or a UI confirm button.
+    Confirm {
+        /// Replace the pending transcript with this before sending it
+        /// on -- omit to confirm the transcript as transcribed.
+        #[arg(long)]
+        text: Option<String>,
+    },
+    /// Answer a pending "does this look good?" prompt with no.
+    Reject,
+    /// Toggle hands-free mode on a running `converse start` loop --
+    /// skips the "does this look good?" confirmation step per turn
+    /// (no UI grace window, no spoken prompt) for a real back-and-forth
+    /// voice conversation. Off by default so the first message in a
+    /// session is still reviewable.
+    HandsFree {
+        #[arg(value_enum)]
+        state: HandsFreeState,
+    },
+}
+
+#[derive(Clone, Copy, clap::ValueEnum)]
+enum HandsFreeState {
+    On,
+    Off,
 }
 
 #[derive(Subcommand)]
@@ -254,6 +311,7 @@ fn main() -> anyhow::Result<()> {
                 file_config.bluebubbles,
                 file_config.telegram,
                 file_config.omapilot,
+                file_config.tts,
             )
         }
         Command::Serve {
@@ -306,6 +364,26 @@ fn main() -> anyhow::Result<()> {
         Command::Openclaw {
             what: OpenclawCommand::ContinueInHerdr,
         } => run_openclaw_continue_in_herdr(file_config.openclaw),
+        Command::Converse {
+            what:
+                ConverseCommand::Start {
+                    text,
+                    classify_base_url,
+                    classify_model_id,
+                },
+        } => run_converse_start(text, classify_base_url, classify_model_id, file_config.tts),
+        Command::Converse {
+            what: ConverseCommand::Stop,
+        } => conversation::stop(),
+        Command::Converse {
+            what: ConverseCommand::Confirm { text },
+        } => conversation::confirm(text.as_deref()),
+        Command::Converse {
+            what: ConverseCommand::Reject,
+        } => conversation::reject(),
+        Command::Converse {
+            what: ConverseCommand::HandsFree { state },
+        } => conversation::set_hands_free(matches!(state, HandsFreeState::On)),
     }
 }
 
@@ -366,6 +444,24 @@ fn run_openclaw_continue_in_herdr(openclaw: Option<config::OpenClawConfig>) -> a
     } else {
         std::process::exit(1);
     }
+}
+
+fn run_converse_start(
+    text: Option<String>,
+    classify_base_url: String,
+    classify_model_id: String,
+    tts: config::TtsConfig,
+) -> anyhow::Result<()> {
+    println!("[omarchy-novad] Starting OpenClaw conversation. Ctrl+C, or 'omarchy-novad converse stop' from another terminal, to end it.");
+    let cfg = converse::ConverseConfig {
+        voxtype_binary: "voxtype".to_string(),
+        transcript_path: transcript_path(),
+        voxtype_state_path: voxtype_state_path(),
+        classify_base_url,
+        classify_model_id,
+        tts,
+    };
+    converse::run(&cfg, text)
 }
 
 fn run_telegram_auth(telegram: Option<config::TelegramConfig>) -> anyhow::Result<()> {
@@ -558,6 +654,7 @@ fn run_detect(
     bluebubbles: Option<config::BlueBubblesConfig>,
     telegram: Option<config::TelegramConfig>,
     omapilot: Option<config::OmaPilotConfig>,
+    tts: config::TtsConfig,
 ) -> anyhow::Result<()> {
     let trigger = resolve_trigger(on_detect);
     let detector = Detector::new(wakeword, device, &cache_dir(), threshold, patience)?;
@@ -603,6 +700,7 @@ fn run_detect(
         bluebubbles,
         telegram,
         omapilot,
+        tts,
     };
 
     let chunk_samples = listener.chunk_samples();

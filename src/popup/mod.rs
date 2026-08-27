@@ -101,11 +101,29 @@ fn runtime_dir() -> PathBuf {
 /// Write the current popup state to disk for the QML `FileView` to pick
 /// up. Best-effort: a failed write just means the popup shows stale
 /// state, not a reason to fail whatever triggered the state change.
+///
+/// Writes to a sibling temp file and `rename()`s it into place rather
+/// than truncating `state_path()` in place -- confirmed live (Omarchy
+/// plugin packaging) that a plain truncate-and-rewrite of the same
+/// inode, done rapidly across the several phase transitions one
+/// session produces, can permanently wedge Quickshell's
+/// `FileView(watchChanges: true)` inotify watch: it just stops firing
+/// reload events for the rest of the session, with no error and no
+/// self-recovery -- only deleting and recreating the file (a fresh
+/// inode) brought it back. `rename()` gives every write a fresh inode
+/// the same way, and also fixes the (previously accepted, see the QML
+/// side's own comment) torn-read possibility of a reader catching the
+/// file mid-truncate.
 pub fn write_state(state: &PopupState) {
     let path = state_path();
     match serde_json::to_string(state) {
         Ok(json) => {
-            if let Err(e) = std::fs::write(&path, json) {
+            let tmp_path = path.with_file_name(format!(
+                "{}.tmp",
+                path.file_name().unwrap_or_default().to_string_lossy()
+            ));
+            let result = std::fs::write(&tmp_path, json).and_then(|_| std::fs::rename(&tmp_path, &path));
+            if let Err(e) = result {
                 tracing::warn!("failed to write popup state to {path:?}: {e}");
             }
         }

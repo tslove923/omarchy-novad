@@ -92,12 +92,35 @@ pub fn run(cfg: &ConverseConfig, initial_utterance: Option<String>) -> anyhow::R
         .inspect_err(|e| tracing::warn!("[converse] control socket failed to start: {e}"))
         .ok();
 
-    let mut state = ConversationState {
-        active: true,
-        phase: None,
-        pending_text: None,
-        turns: Vec::new(),
-        hands_free: false,
+    // Seeded fully correct up front when an utterance is already in
+    // hand (the real wake-word path: pipeline.rs always calls this
+    // with `Some(transcript)`, never listens fresh first) instead of
+    // writing `{active:true, phase:null}` and then, microseconds
+    // later with no delay in between, overwriting it with
+    // `{phase:confirming, pending_text:...}` from confirm_utterance's
+    // first loop iteration. Found live: the QML FileView watching this
+    // file doesn't necessarily catch up between two such rapid writes,
+    // so the panel could go straight from "just opened, empty" to
+    // whatever phase came *after* confirming -- the user's own first
+    // message never got a stable frame to render in, looking like it
+    // "didn't land" even though the backend handled it correctly.
+    // de-duped by `confirm_utterance`'s own write ending up identical
+    // to this one on its first iteration -- redundant, not wrong.
+    let mut state = match &initial_utterance {
+        Some(u) => ConversationState {
+            active: true,
+            phase: Some(ConversationPhase::Confirming),
+            pending_text: Some(u.clone()),
+            turns: Vec::new(),
+            hands_free: false,
+        },
+        None => ConversationState {
+            active: true,
+            phase: None,
+            pending_text: None,
+            turns: Vec::new(),
+            hands_free: false,
+        },
     };
     conversation::write_state(&state);
 

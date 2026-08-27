@@ -271,6 +271,15 @@ pub fn looks_like_telegram_command(text: &str) -> bool {
     telegram::looks_like_telegram_command(text)
 }
 
+/// Same recovery, OpenClaw side -- see
+/// `openclaw::looks_like_external_command`'s docs. Recovers into
+/// `Intent::External`, not routed through `route()` at all (see
+/// `is_external_handoff`) -- pipeline.rs checks this ahead of that
+/// branch instead of after, unlike the Message/Telegram checks above.
+pub fn looks_like_external_command(text: &str) -> bool {
+    openclaw::looks_like_external_command(text)
+}
+
 /// Execute a [`RouteResult::NeedsConfirmation`] command after the user
 /// approved it in the popup — dispatches on the `kind` that came back
 /// with it. `bluebubbles` mirrors `route`'s own parameter: `None` when

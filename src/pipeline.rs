@@ -151,8 +151,58 @@ pub fn run_session(cfg: &PipelineConfig) {
         result.latency.as_secs_f32()
     );
 
-    if router::is_external_handoff(result.intent) {
-        // Full transcript, not result.argument -- see
+    // Recovery: MEMORY_RETURN has no local handler (see router::route's
+    // doc comment), so it's a safe bucket to double-check rather than a
+    // risk of overriding a confident, actionable classification. If the
+    // *original* transcript's leading word(s) look like a MESSAGE,
+    // TELEGRAM, or OpenClaw trigger -- including a plausible ASR
+    // mis-hearing, e.g. "tax" for "text" (observed live: "text Jessica
+    // is this working?" came back transcribed as "Tax is this
+    // working.", which the classifier had no reason to read as anything
+    // but MEMORY_RETURN), or "Ask open. Claw. what..." for "ask
+    // openclaw what..." (a stray sentence-break inserted mid-word) --
+    // route the full transcript instead of the classifier's own
+    // argument extraction, which had already lost whatever didn't
+    // survive transcription. See router::looks_like_message_command /
+    // looks_like_telegram_command / looks_like_external_command's docs.
+    // Checked in this order (Message, then Telegram, then OpenClaw)
+    // only because Message was the one actually observed misfiring
+    // live first; the trigger word sets don't overlap so the order
+    // otherwise doesn't matter. This has to happen before
+    // `is_external_handoff` below, not after -- Coding/External never
+    // go through `route()` at all, so a recovery into `Intent::External`
+    // needs to reach that check, not this one's `route()` call.
+    let (route_intent, route_argument) = if result.intent == Intent::MemoryReturn
+        && cfg.bluebubbles.is_some()
+        && router::looks_like_message_command(&transcript)
+    {
+        tracing::info!(
+            "[pipeline] recovering misclassified MEMORY_RETURN as MESSAGE (leading word looks \
+             like a mis-heard message trigger): {transcript:?}"
+        );
+        (Intent::Message, transcript.clone())
+    } else if result.intent == Intent::MemoryReturn
+        && cfg.telegram.is_some()
+        && router::looks_like_telegram_command(&transcript)
+    {
+        tracing::info!(
+            "[pipeline] recovering misclassified MEMORY_RETURN as TELEGRAM (leading word looks \
+             like a mis-heard telegram trigger): {transcript:?}"
+        );
+        (Intent::Telegram, transcript.clone())
+    } else if result.intent == Intent::MemoryReturn && router::looks_like_external_command(&transcript)
+    {
+        tracing::info!(
+            "[pipeline] recovering misclassified MEMORY_RETURN as EXTERNAL (leading words look \
+             like a mis-heard OpenClaw trigger): {transcript:?}"
+        );
+        (Intent::External, transcript.clone())
+    } else {
+        (result.intent, result.argument.clone())
+    };
+
+    if router::is_external_handoff(route_intent) {
+        // Full transcript, not route_argument -- see
         // router::handoff_to_openclaw's docs for why a
         // coding/reasoning handoff needs the whole utterance rather
         // than the classifier's (often keyword-stripped) extraction.
@@ -184,43 +234,6 @@ pub fn run_session(cfg: &PipelineConfig) {
         }
         return;
     }
-
-    // Recovery: MEMORY_RETURN has no local handler (see router::route's
-    // doc comment), so it's a safe bucket to double-check rather than a
-    // risk of overriding a confident, actionable classification. If the
-    // *original* transcript's leading word looks like a MESSAGE or
-    // TELEGRAM trigger verb -- including a plausible ASR mis-hearing,
-    // e.g. "tax" for "text" (observed live: "text Jessica is this
-    // working?" came back transcribed as "Tax is this working.", which
-    // the classifier had no reason to read as anything but
-    // MEMORY_RETURN) -- route the full transcript instead of the
-    // classifier's own argument extraction, which had already lost
-    // whatever didn't survive transcription. See
-    // router::looks_like_message_command / looks_like_telegram_command's
-    // docs. Checked in this order (Message before Telegram) only because
-    // Message was the one actually observed misfiring live; the trigger
-    // word sets don't overlap so the order otherwise doesn't matter.
-    let (route_intent, route_argument) = if result.intent == Intent::MemoryReturn
-        && cfg.bluebubbles.is_some()
-        && router::looks_like_message_command(&transcript)
-    {
-        tracing::info!(
-            "[pipeline] recovering misclassified MEMORY_RETURN as MESSAGE (leading word looks \
-             like a mis-heard message trigger): {transcript:?}"
-        );
-        (Intent::Message, transcript.clone())
-    } else if result.intent == Intent::MemoryReturn
-        && cfg.telegram.is_some()
-        && router::looks_like_telegram_command(&transcript)
-    {
-        tracing::info!(
-            "[pipeline] recovering misclassified MEMORY_RETURN as TELEGRAM (leading word looks \
-             like a mis-heard telegram trigger): {transcript:?}"
-        );
-        (Intent::Telegram, transcript.clone())
-    } else {
-        (result.intent, result.argument.clone())
-    };
 
     match router::route(
         route_intent,

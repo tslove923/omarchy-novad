@@ -90,11 +90,24 @@ fn runtime_dir() -> PathBuf {
 /// `FileView` to pick up. Best-effort, same reasoning as
 /// `popup::write_state`: a failed write just means the window shows
 /// stale state, not a reason to interrupt the conversation loop.
+///
+/// Write-temp-then-rename, not a truncate-in-place -- see
+/// `popup::write_state`'s doc comment for why (confirmed live: rapid
+/// truncate-and-rewrite of the same inode can permanently wedge
+/// Quickshell's `FileView` watch). This module's loop writes even more
+/// frequently per turn (listening/confirming/thinking/speaking, plus a
+/// fresh write per confirm-round correction) than the popup's, so it's
+/// if anything more exposed to the same bug.
 pub fn write_state(state: &ConversationState) {
     let path = state_path();
     match serde_json::to_string(state) {
         Ok(json) => {
-            if let Err(e) = std::fs::write(&path, json) {
+            let tmp_path = path.with_file_name(format!(
+                "{}.tmp",
+                path.file_name().unwrap_or_default().to_string_lossy()
+            ));
+            let result = std::fs::write(&tmp_path, json).and_then(|_| std::fs::rename(&tmp_path, &path));
+            if let Err(e) = result {
                 tracing::warn!("failed to write conversation state to {path:?}: {e}");
             }
         }

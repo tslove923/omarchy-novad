@@ -296,6 +296,7 @@ fn main() -> anyhow::Result<()> {
                 file_config.bluebubbles,
                 file_config.telegram,
                 file_config.omapilot,
+                file_config.tts,
             )
         }
         Command::Serve {
@@ -635,6 +636,7 @@ fn run_detect(
     bluebubbles: Option<config::BlueBubblesConfig>,
     telegram: Option<config::TelegramConfig>,
     omapilot: Option<config::OmaPilotConfig>,
+    tts: config::TtsConfig,
 ) -> anyhow::Result<()> {
     let trigger = resolve_trigger(on_detect);
     let detector = Detector::new(wakeword, device, &cache_dir(), threshold, patience)?;
@@ -680,6 +682,7 @@ fn run_detect(
         bluebubbles,
         telegram,
         omapilot,
+        tts,
     };
 
     let chunk_samples = listener.chunk_samples();

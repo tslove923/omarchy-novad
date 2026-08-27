@@ -404,8 +404,13 @@ openclaw-handoff "reply with the single word PING and nothing else" "smoke-test"
 ```
 
 Then say the wake word and something open-ended ("what's the capital
-of France", "write a python script to sort a list") — the popup
-should show "Asking OpenClaw…" and come back with a real answer.
+of France", "write a python script to sort a list") — this now enters
+the full conversation loop (see [OpenClaw voice
+conversation](#openclaw-voice-conversation-converse) below) rather
+than a one-shot exchange: it'll confirm what it heard, hand off to
+OpenClaw, show the full reply in the conversation window, speak a
+summary, and keep listening for your next turn until you say a stop
+phrase or run `omarchy-novad converse stop`.
 
 ### Continuing a conversation in Herdr
 
@@ -449,18 +454,32 @@ write that into `approve_device_command` instead.
 
 ## OpenClaw voice conversation (`converse`)
 
-`omarchy-novad converse start` is a third way to talk to OpenClaw,
-alongside the automatic wake-word handoff and `continue-in-herdr`
-above: a genuine spoken back-and-forth. It listens (reusing the same
-voxtype record/transcribe round-trip the wake-word pipeline uses),
-hands the utterance to OpenClaw (`router::handoff_external`, same
-`agent:main:novad:voice` session the automatic handoff uses — so
-context carries over exactly like it already does there), shows
-OpenClaw's *full* reply in a dedicated Quickshell window
-(`quickshell/OpenClawConversation.qml`), speaks a shorter conversational
-summary of it out loud, then listens again — looping until you say a
-stop phrase ("stop conversation", "end conversation", "goodbye
-jarvis") or run `omarchy-novad converse stop` from another terminal.
+This is what actually runs a genuine spoken back-and-forth with
+OpenClaw — and, since it's the default handler for
+`Intent::External`/`Intent::Coding`, it's what the automatic wake-word
+path enters too the moment you say something open-ended (see
+[Verify](#verify) above), not just a manually-run mode. It listens
+(reusing the same voxtype record/transcribe round-trip the wake-word
+pipeline uses), confirms what it heard, hands the utterance to
+OpenClaw (`router::handoff_external`, same `agent:main:novad:voice`
+session the plain one-shot handoff used to use — so context carries
+over the same way), shows OpenClaw's *full* reply in a dedicated
+Quickshell window (`quickshell/OpenClawConversation.qml`), speaks a
+shorter conversational summary of it out loud, then listens again —
+looping until you say a stop phrase ("stop conversation", "end
+conversation", "goodbye jarvis") or run `omarchy-novad converse stop`
+from another terminal. `omarchy-novad converse start` runs the exact
+same loop by hand, without needing to say the wake word first —
+useful for testing, or starting a conversation from a script/keybind.
+
+Deliberately OpenClaw-only, no `[omapilot] fallback` here: OmaPilot's
+`askText` handoff never returns a real reply (see
+[OmaPilot integration](#omapilot-integration)'s `askText` discussion),
+so it has no way to power a conversation loop even in principle.
+OmaPilot is still reachable via its own `direct_target`/
+`direct_target_prefix` trigger ("hey jarvis, pilot: ...", see
+[Configuration](#configuration)), which bypasses classification
+(and this whole conversation flow) entirely, same as before.
 
 ```bash
 omarchy-novad converse start

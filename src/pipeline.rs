@@ -60,6 +60,12 @@ pub struct PipelineConfig {
     /// checked, and `Intent::External`/`Coding`'s handoff only ever
     /// tries OpenClaw. See `router::omapilot`.
     pub omapilot: Option<OmaPilotConfig>,
+    /// Voice/model for `crate::converse`'s TTS playback -- see that
+    /// module's docs. Used whenever `Intent::External`/`Coding`
+    /// hands off to OpenClaw: see this file's `is_external_handoff`
+    /// branch, which now enters the full conversation loop rather
+    /// than a one-shot handoff.
+    pub tts: crate::config::TtsConfig,
 }
 
 /// Run one full session after a wake-word detection: start voxtype
@@ -150,15 +156,32 @@ pub fn run_session(cfg: &PipelineConfig) {
         // router::handoff_to_openclaw's docs for why a
         // coding/reasoning handoff needs the whole utterance rather
         // than the classifier's (often keyword-stripped) extraction.
-        popup::write_state(&PopupState {
-            phase: PopupPhase::HandingOff,
-            text: transcript.clone(),
-            confirm_label: None,
-            editable: false,
-        });
-        let (success, message) = router::handoff_external(&transcript, cfg.omapilot.as_ref());
-        tracing::info!("[pipeline] external handoff: success={success} message={message:?}");
-        show_ready_and_wait(&message);
+        //
+        // Enters the full conversation loop (crate::converse) rather
+        // than a one-shot handoff-and-show -- the wake word now starts
+        // a back-and-forth with OpenClaw instead of a single exchange;
+        // subsequent turns keep listening without needing the wake
+        // word again, until a stop phrase or `converse stop`. This
+        // path is deliberately OpenClaw-only, no `[omapilot] fallback`
+        // -- OmaPilot's `askText` handoff never returns a real reply
+        // (see router::omapilot's docs), so it has no way to power a
+        // conversation loop even in principle; OmaPilot is still
+        // reachable via its own `direct_target`/`direct_target_prefix`
+        // trigger (checked above, before classification), unaffected
+        // by this.
+        tracing::info!("[pipeline] external/coding request -- entering the conversation loop");
+        popup::write_state(&PopupState::default());
+        let converse_cfg = crate::converse::ConverseConfig {
+            voxtype_binary: cfg.voxtype_binary.clone(),
+            transcript_path: cfg.transcript_path.clone(),
+            voxtype_state_path: cfg.voxtype_state_path.clone(),
+            classify_base_url: cfg.classify_base_url.clone(),
+            classify_model_id: cfg.classify_model_id.clone(),
+            tts: cfg.tts.clone(),
+        };
+        if let Err(e) = crate::converse::run(&converse_cfg, Some(transcript.clone())) {
+            tracing::error!("[pipeline] conversation loop ended with an error: {e}");
+        }
         return;
     }
 

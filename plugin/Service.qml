@@ -144,6 +144,21 @@ QtObject {
         onFileChanged: reload()
     }
 
+    // Starts the OpenClaw voice-conversation loop -- see
+    // src/conversation/mod.rs's ConverseCommand::Start. The
+    // ConversationPanel (Overlay.qml) shows itself automatically the
+    // moment `conversationActive` flips true, so this is also the
+    // real equivalent of "open the chat window": there is no separate
+    // "show the panel" action, starting the loop *is* what makes it
+    // appear. Added alongside the pre-existing `stopConversation()` so
+    // BarWidget's context menu (nova's ported "OpenClaw Chat" item)
+    // can toggle the loop on/off through one Service action pair,
+    // same as every other daemon action here.
+    function startConversation() {
+        _converseProcess.command = [root.novadBinary, "converse", "start"];
+        _converseProcess.running = true;
+    }
+
     function stopConversation() {
         _converseProcess.command = [root.novadBinary, "converse", "stop"];
         _converseProcess.running = true;

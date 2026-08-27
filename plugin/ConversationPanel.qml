@@ -39,7 +39,7 @@ PanelWindow {
     readonly property string phase: root.service ? root.service.conversationPhase : ""
     readonly property string pendingText: root.service ? root.service.conversationPendingText : ""
     readonly property var turns: root.service ? root.service.conversationTurns : []
-    readonly property bool handsFree: root.service ? root.service.conversationHandsFree : false
+    readonly property int thinkingElapsedSecs: root.service ? root.service.conversationThinkingElapsedSecs : -1
 
     visible: active
 
@@ -83,27 +83,33 @@ PanelWindow {
         case "confirming": return OmarchyTheme.yellow;
         case "thinking": return OmarchyTheme.magenta;
         case "speaking": return OmarchyTheme.green;
-        default: return root.mutedColor;
+        default: return root.mutedColor; // "" -- idle, waiting for Record
         }
     }
 
     readonly property string phaseLabel: {
         switch (phase) {
         case "listening": return "Listening…";
-        case "confirming": return "Confirming…";
-        case "thinking": return "Thinking…";
+        case "confirming": return "Reviewing…";
+        case "thinking": return root.thinkingElapsedSecs >= 0
+            ? "Thinking… (" + root.thinkingElapsedSecs + "s)" : "Thinking…";
         case "speaking": return "Speaking…";
-        default: return "";
+        default: return active ? "Ready" : "";
         }
     }
 
     readonly property bool confirmBoxVisible: phase === "confirming"
+    // "" (idle) is the only phase where a fresh recording can be
+    // started -- listening/confirming/thinking/speaking are all
+    // already mid-turn.
+    readonly property bool listenButtonVisible: active && phase === ""
+    readonly property bool stopListeningButtonVisible: phase === "listening"
 
     function stopConversation() {
         if (root.service) root.service.stopConversation();
     }
 
-    // Confirms (optionally with edited text) or rejects the pending
+    // Sends (optionally with edited text) or discards the pending
     // transcript -- see src/conversation/mod.rs's ConversationAction.
     function confirmPending(text) {
         if (root.service) root.service.confirmPending(text);
@@ -113,8 +119,17 @@ PanelWindow {
         if (root.service) root.service.rejectPending();
     }
 
-    function toggleHandsFree() {
-        if (root.service) root.service.setHandsFree(!root.handsFree);
+    // Starts a new recording for the next turn -- the daemon never
+    // starts one on its own between turns, see converse.rs's module
+    // doc comment.
+    function startListening() {
+        if (root.service) root.service.startListening();
+    }
+
+    // Ends the in-progress recording early instead of waiting for
+    // voxtype's own silence-timeout.
+    function stopListeningNow() {
+        if (root.service) root.service.stopListening();
     }
 
     Rectangle {
@@ -154,18 +169,29 @@ PanelWindow {
                 anchors.verticalCenter: parent.verticalCenter
                 spacing: 8
 
-                // Hands-free: once on, each turn skips "does this look
-                // good?" entirely -- talk back and forth with no
-                // confirm step. Off by default; the first message in a
-                // session is still reviewable unless this is already
-                // on when it's transcribed. See
-                // src/conversation/mod.rs's ConversationState::hands_free.
+                // Record: only shown once idle (phase === ""), waiting
+                // for the user to start the next turn -- the daemon
+                // never starts a recording on its own. See converse.rs's
+                // module doc comment for why this whole flow is
+                // manually triggered rather than an automatic loop.
                 PopupButton {
                     anchors.verticalCenter: parent.verticalCenter
-                    label: root.handsFree ? "Hands-Free: On" : "Hands-Free"
-                    tint: OmarchyTheme.green
-                    primary: root.handsFree
-                    onClicked: root.toggleHandsFree()
+                    visible: root.listenButtonVisible
+                    label: "Record"
+                    tint: OmarchyTheme.accent
+                    onClicked: root.startListening()
+                }
+
+                // Stop Listening: only shown while actually recording --
+                // ends it early instead of waiting for voxtype's own
+                // silence-timeout. Distinct from the "Stop" button
+                // below, which ends the whole conversation.
+                PopupButton {
+                    anchors.verticalCenter: parent.verticalCenter
+                    visible: root.stopListeningButtonVisible
+                    label: "Stop Listening"
+                    tint: OmarchyTheme.yellow
+                    onClicked: root.stopListeningNow()
                 }
 
                 PopupButton {
@@ -223,14 +249,12 @@ PanelWindow {
                 }
             }
 
-            // ── Pending-transcript confirmation -- "does this look
-            //    good?" (see src/converse.rs::confirm_utterance).
-            //    Editable, same TextEdit-in-a-bordered-box pattern as
-            //    PopupCard's own edit box; Enter confirms (with
-            //    whatever's currently in the box, edited or not)
-            //    exactly like clicking Confirm, so a fast edit-and-
-            //    Enter pre-empts the spoken "yes/no" prompt (see
-            //    converse.rs's UI_CONFIRM_GRACE window). ──
+            // ── Pending-transcript review -- no timeout, no voice
+            //    fallback (see src/converse.rs's wait_for_review): sits
+            //    here for as long as the user wants. Editable, same
+            //    TextEdit-in-a-bordered-box pattern as PopupCard's own
+            //    edit box; Enter sends (with whatever's currently in
+            //    the box, edited or not) exactly like clicking Confirm. ──
             Rectangle {
                 id: confirmBox
                 width: parent.width
@@ -261,7 +285,7 @@ PanelWindow {
                     spacing: 8
 
                     Text {
-                        text: "Does this look good?"
+                        text: "Edit if needed, then press Enter to send"
                         color: root.mutedColor
                         font.pixelSize: 12
                         font.weight: Font.Medium
@@ -322,13 +346,13 @@ PanelWindow {
                         anchors.right: parent.right
 
                         PopupButton {
-                            label: "Reject"
+                            label: "Discard"
                             tint: root.danger
                             onClicked: root.rejectPending()
                         }
 
                         PopupButton {
-                            label: "Confirm"
+                            label: "Send"
                             tint: root.accent
                             onClicked: root.confirmPending(pendingField.text)
                         }

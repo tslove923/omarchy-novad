@@ -42,7 +42,15 @@ fi
 conv="$(printf '%s' "$conv" | tr -c 'A-Za-z0-9._-' '_')"
 
 export OPENCLAW_GATEWAY_URL OPENCLAW_GATEWAY_TOKEN
-out="$(openclaw agent --agent main --session-key "agent:main:novad:$conv" --message "$msg" --json 2>/tmp/openclaw-handoff.err)"
+# --timeout: openclaw's own default is 600s ("openclaw agent --help").
+# novad's Rust side (router::openclaw::handoff) no longer imposes any
+# timeout of its own -- it just waits for this process to exit, however
+# long that takes -- so this is the one real backstop left against a
+# truly wedged gateway. Set high (24h) rather than removed entirely:
+# openclaw's CLI has no documented "no timeout" value, and some real
+# ceiling is safer than none against a gateway that's actually hung
+# rather than just slow.
+out="$(openclaw agent --agent main --session-key "agent:main:novad:$conv" --message "$msg" --timeout 86400 --json 2>/tmp/openclaw-handoff.err)"
 rc=$?
 if [[ $rc -ne 0 ]]; then
   cat /tmp/openclaw-handoff.err >&2 || true

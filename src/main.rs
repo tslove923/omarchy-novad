@@ -209,12 +209,14 @@ enum OpenclawCommand {
 
 #[derive(Subcommand)]
 enum ConverseCommand {
-    /// Start the loop: listen, hand off to OpenClaw, show + speak the
-    /// reply, listen for the follow-up, repeat until stopped (`converse
-    /// stop`, or a spoken stop phrase -- see `converse::STOP_PHRASES`).
+    /// Start the loop: wait for the user to trigger a recording, hand
+    /// the reviewed/edited transcript off to OpenClaw, show + speak
+    /// the reply, wait again -- never listens on its own, only when
+    /// asked (`converse listen`) -- until stopped (`converse stop`).
     Start {
-        /// Skip the first listen and hand this off immediately -- e.g.
-        /// from a wake-word trigger that already captured an utterance.
+        /// Skip straight to reviewing this text instead of waiting for
+        /// a first recording -- e.g. from a wake-word trigger that
+        /// already captured an utterance.
         #[arg(long)]
         text: Option<String>,
         #[arg(long, default_value = "http://127.0.0.1:8420")]
@@ -224,32 +226,24 @@ enum ConverseCommand {
     },
     /// End a running `converse start` loop after its current turn.
     Stop,
-    /// Answer a pending "does this look good?" prompt with yes --
-    /// called by the conversation window's edit box on Enter (with
-    /// `--text` set to whatever's in the box) or a UI confirm button.
+    /// Send the pending transcript to OpenClaw -- called by the
+    /// conversation window's edit box on Enter (with `--text` set to
+    /// whatever's in the box) or a UI Confirm/Send button.
     Confirm {
         /// Replace the pending transcript with this before sending it
-        /// on -- omit to confirm the transcript as transcribed.
+        /// on -- omit to send the transcript as transcribed.
         #[arg(long)]
         text: Option<String>,
     },
-    /// Answer a pending "does this look good?" prompt with no.
+    /// Discard the pending transcript without sending it.
     Reject,
-    /// Toggle hands-free mode on a running `converse start` loop --
-    /// skips the "does this look good?" confirmation step per turn
-    /// (no UI grace window, no spoken prompt) for a real back-and-forth
-    /// voice conversation. Off by default so the first message in a
-    /// session is still reviewable.
-    HandsFree {
-        #[arg(value_enum)]
-        state: HandsFreeState,
-    },
-}
-
-#[derive(Clone, Copy, clap::ValueEnum)]
-enum HandsFreeState {
-    On,
-    Off,
+    /// Start a new recording for the next turn (e.g. a "Record"
+    /// button) -- the running loop never starts one on its own.
+    Listen,
+    /// End an in-progress recording early (a "toggle" button while
+    /// listening), same effect as voxtype's own silence-timeout just
+    /// user-triggered.
+    StopListening,
 }
 
 #[derive(Subcommand)]
@@ -382,8 +376,11 @@ fn main() -> anyhow::Result<()> {
             what: ConverseCommand::Reject,
         } => conversation::reject(),
         Command::Converse {
-            what: ConverseCommand::HandsFree { state },
-        } => conversation::set_hands_free(matches!(state, HandsFreeState::On)),
+            what: ConverseCommand::Listen,
+        } => conversation::listen(),
+        Command::Converse {
+            what: ConverseCommand::StopListening,
+        } => conversation::stop_listening(),
     }
 }
 

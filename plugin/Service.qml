@@ -102,18 +102,23 @@ QtObject {
     // quickshell/ConversationState.qml's fields exactly.
 
     property bool conversationActive: false
-    // "listening" | "confirming" | "thinking" | "speaking" | "" (absent/no phase).
+    // "listening" | "confirming" | "thinking" | "speaking" | "" (idle,
+    // waiting for the user to trigger a recording, or absent/no phase
+    // before the very first turn).
     property string conversationPhase: ""
-    // The just-transcribed utterance awaiting "does this look good?"
-    // confirmation, or "" when there's nothing pending -- only
-    // meaningful while conversationPhase === "confirming".
+    // The just-transcribed utterance awaiting review/send, or "" when
+    // there's nothing pending -- only meaningful while
+    // conversationPhase === "confirming".
     property string conversationPendingText: ""
     // Array of { user_text, full_response, spoken_summary } objects,
     // oldest first -- see src/conversation/mod.rs's ConversationTurn.
     property var conversationTurns: []
-    // Skips per-turn "does this look good?" confirmation when on -- see
-    // src/conversation/mod.rs's ConversationState::hands_free.
-    property bool conversationHandsFree: false
+    // Seconds elapsed on the current OpenClaw handoff, or -1 when not
+    // thinking -- see src/conversation/mod.rs's
+    // ConversationState::thinking_elapsed_secs. The call has no
+    // timeout, so this is the only sign of life the panel can show
+    // during a long-running agent turn.
+    property int conversationThinkingElapsedSecs: -1
 
     readonly property var latestTurn: conversationTurns.length > 0
         ? conversationTurns[conversationTurns.length - 1] : null
@@ -130,7 +135,8 @@ QtObject {
                 root.conversationPhase = parsed.phase || "";
                 root.conversationPendingText = parsed.pending_text || "";
                 root.conversationTurns = parsed.turns || [];
-                root.conversationHandsFree = parsed.hands_free || false;
+                root.conversationThinkingElapsedSecs = (parsed.thinking_elapsed_secs !== undefined
+                    && parsed.thinking_elapsed_secs !== null) ? parsed.thinking_elapsed_secs : -1;
             } catch (e) {
                 // Same non-atomic-write caveat as popup-state.json above.
             }
@@ -143,7 +149,7 @@ QtObject {
             root.conversationPhase = "";
             root.conversationPendingText = "";
             root.conversationTurns = [];
-            root.conversationHandsFree = false;
+            root.conversationThinkingElapsedSecs = -1;
         }
 
         onFileChanged: reload()
@@ -194,16 +200,27 @@ QtObject {
         _converseControlProcess.running = true;
     }
 
-    function setHandsFree(enabled) {
-        _converseControlProcess.command = [root.novadBinary, "converse", "hands-free", enabled ? "on" : "off"];
+    // Starts a new recording for the next turn -- the running loop
+    // never starts one on its own, only when this is called (e.g. a
+    // "Record" button).
+    function startListening() {
+        _converseControlProcess.command = [root.novadBinary, "converse", "listen"];
+        _converseControlProcess.running = true;
+    }
+
+    // Ends an in-progress recording early -- a "toggle" button while
+    // conversationPhase === "listening", same effect as voxtype's own
+    // silence-timeout just user-triggered.
+    function stopListening() {
+        _converseControlProcess.command = [root.novadBinary, "converse", "stop-listening"];
         _converseControlProcess.running = true;
     }
 
     property Process _converseStartProcess: Process { running: false }
-    // Reused across stop/confirm/reject -- each is a quick one-shot
-    // CLI call (connects to the running session's control socket,
-    // sends one action, exits), never overlapping with another one in
-    // practice (a human can't click Confirm and Reject in the same
-    // instant), unlike _converseStartProcess above.
+    // Reused across stop/confirm/reject/listen/stop-listening -- each
+    // is a quick one-shot CLI call (connects to the running session's
+    // control socket, sends one action, exits), never overlapping with
+    // another one in practice (a human can't click two of these
+    // buttons in the same instant), unlike _converseStartProcess above.
     property Process _converseControlProcess: Process { running: false }
 }

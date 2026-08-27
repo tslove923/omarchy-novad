@@ -9,13 +9,17 @@
 //!   change. A dedicated QML window
 //!   (`quickshell/OpenClawConversation.qml`) watches it the same way
 //!   the popup watches `popup-state.json`.
-//! - **UI -> daemon**: `omarchy-novad converse {stop,confirm,reject}`
-//!   connects to this module's control socket and sends one JSON line
-//!   -- same mechanism as `popup::respond`, on a separate socket path
-//!   so the two features' state never mixes. The conversation window's
-//!   pending-text box runs `converse confirm --text "<edited text>"`
-//!   on Enter (an edit + confirm in one action, no separate "edit"
-//!   round-trip needed) and a Reject button runs `converse reject`.
+//! - **UI -> daemon**: `omarchy-novad converse
+//!   {stop,confirm,reject,listen,stop-listening}` connects to this
+//!   module's control socket and sends one JSON line -- same mechanism
+//!   as `popup::respond`, on a separate socket path so the two
+//!   features' state never mixes. A "Record" button runs `converse
+//!   listen` to start a turn's recording (the daemon never starts one
+//!   on its own); a "stop recording" toggle runs `converse
+//!   stop-listening` to end it early. Once a transcript is up for
+//!   review, the conversation window's pending-text box runs `converse
+//!   confirm --text "<edited text>"` on Enter (an edit + send in one
+//!   action) and a Reject button runs `converse reject`.
 
 use std::io::{BufRead as _, Write as _};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -64,16 +68,14 @@ pub struct ConversationState {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pending_text: Option<String>,
     pub turns: Vec<ConversationTurn>,
-    /// When true, `converse::run`'s loop skips the "does this look
-    /// good?" confirmation step entirely (no UI grace window, no
-    /// spoken confirm prompt) and sends each transcript straight to
-    /// OpenClaw -- a real hands-free back-and-forth instead of
-    /// confirm-every-turn. Toggled by the UI's hands-free button (see
-    /// `ConversationPanel.qml`) or `omarchy-novad converse hands-free
-    /// <on|off>`; defaults off so the first message in a session is
-    /// still reviewable before it's sent.
-    #[serde(default)]
-    pub hands_free: bool,
+    /// Seconds elapsed on the current OpenClaw handoff -- only
+    /// meaningful while `phase == Some(Thinking)`. There's no timeout
+    /// on that call any more (a real agent turn can legitimately run
+    /// for minutes), so this is the only feedback the panel has that
+    /// it's still alive rather than hung -- see
+    /// `converse::run_handoff_with_progress`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thinking_elapsed_secs: Option<u64>,
 }
 
 pub fn state_path() -> PathBuf {
@@ -126,23 +128,24 @@ pub fn write_state(state: &ConversationState) {
 }
 
 /// Actions the conversation window (or `omarchy-novad converse
-/// <action>`) can send back. `Confirm`/`Reject` answer the "does this
-/// look good?" prompt for `pending_text` -- the same question a
-/// spoken "yes"/"no" answers (see `converse::confirm_utterance`, which
-/// checks this channel first and only falls back to a voice prompt if
-/// nothing arrives in a short grace window -- fast enough that hitting
-/// Enter in the UI's text box pre-empts the voice prompt entirely
-/// rather than racing it). `Confirm`'s `text`, when present, is the
-/// edited pending text to send instead of the original transcript --
-/// an edit and a confirm in one action, since the UI never needs to
-/// stage an edit without also deciding yes/no about it.
+/// <action>`) can send back. `Listen` starts a new recording (e.g. a
+/// "Record" button) -- `converse::run` never starts one on its own
+/// between turns. `StopListening` ends an in-progress recording early
+/// (a "toggle" button while listening), same effect as voxtype's own
+/// silence-timeout just user-triggered. `Confirm`/`Reject` answer
+/// "send this?" for `pending_text` once a transcript is up for review
+/// -- no timeout, no voice fallback (see `converse::wait_for_review`).
+/// `Confirm`'s `text`, when present, is the edited pending text to
+/// send instead of the original transcript -- an edit and a send in
+/// one action, since the UI never needs to stage an edit without also
+/// deciding whether to send it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConversationAction {
     Stop,
     Confirm { text: Option<String> },
     Reject,
-    /// Toggle hands-free mode -- see `ConversationState::hands_free`.
-    HandsFree(bool),
+    Listen,
+    StopListening,
 }
 
 impl ConversationAction {
@@ -151,8 +154,8 @@ impl ConversationAction {
             "stop" => Some(Self::Stop),
             "confirm" => Some(Self::Confirm { text }),
             "reject" => Some(Self::Reject),
-            "hands_free_on" => Some(Self::HandsFree(true)),
-            "hands_free_off" => Some(Self::HandsFree(false)),
+            "listen" => Some(Self::Listen),
+            "stop_listening" => Some(Self::StopListening),
             _ => None,
         }
     }
@@ -233,21 +236,29 @@ pub fn stop() -> anyhow::Result<()> {
     send_action("stop", None)
 }
 
-/// `omarchy-novad converse confirm [--text ...]` entry point: answer
-/// "does this look good?" with yes, optionally replacing the pending
-/// text with an edited version first (see `ConversationAction::Confirm`).
+/// `omarchy-novad converse confirm [--text ...]` entry point: send the
+/// pending transcript (optionally replaced with an edited version
+/// first -- see `ConversationAction::Confirm`) to OpenClaw.
 pub fn confirm(text: Option<&str>) -> anyhow::Result<()> {
     send_action("confirm", text)
 }
 
-/// `omarchy-novad converse reject` entry point: answer "does this look
-/// good?" with no.
+/// `omarchy-novad converse reject` entry point: discard the pending
+/// transcript without sending it.
 pub fn reject() -> anyhow::Result<()> {
     send_action("reject", None)
 }
 
-/// `omarchy-novad converse hands-free <on|off>` entry point: toggle
-/// whether the running loop skips per-turn confirmation.
-pub fn set_hands_free(enabled: bool) -> anyhow::Result<()> {
-    send_action(if enabled { "hands_free_on" } else { "hands_free_off" }, None)
+/// `omarchy-novad converse listen` entry point: start a new recording
+/// for the next turn (e.g. a "Record" button) -- the running loop
+/// never starts one on its own.
+pub fn listen() -> anyhow::Result<()> {
+    send_action("listen", None)
+}
+
+/// `omarchy-novad converse stop-listening` entry point: end an
+/// in-progress recording early (a "toggle" button while listening),
+/// same effect as voxtype's own silence-timeout just user-triggered.
+pub fn stop_listening() -> anyhow::Result<()> {
+    send_action("stop_listening", None)
 }

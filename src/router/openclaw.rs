@@ -70,13 +70,6 @@ pub fn looks_like_external_command(text: &str) -> bool {
     leading.contains("openclaw") || leading.contains("open claw")
 }
 
-/// Generous timeout for one handoff round-trip. OpenClaw runs a real
-/// agent turn (can involve tool calls, web fetches, etc.), not a
-/// single classify-sized LLM call -- the ~10s PING smoke test was the
-/// floor, not the ceiling. Long enough to cover a real request, short
-/// enough that a hung gateway doesn't stall the popup indefinitely.
-const HANDOFF_TIMEOUT: Duration = Duration::from_secs(60);
-
 /// All wake-word-triggered handoffs share one conversation so OpenClaw
 /// keeps context across turns (nova's own `coding_bridge.py` did the
 /// same with its in-process `_history` list) -- omarchy-novad doesn't have a
@@ -114,29 +107,24 @@ pub fn handoff(utterance: &str) -> (bool, String) {
         }
     };
 
-    let start = std::time::Instant::now();
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break status,
-            Ok(None) => {
-                if start.elapsed() >= HANDOFF_TIMEOUT {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    tracing::warn!("[router:openclaw] handoff timed out after {HANDOFF_TIMEOUT:?}");
-                    return (
-                        false,
-                        "The external assistant took too long to respond".to_string(),
-                    );
-                }
-                std::thread::sleep(Duration::from_millis(50));
-            }
-            Err(e) => {
-                tracing::warn!("[router:openclaw] wait failed: {e}");
-                return (
-                    false,
-                    "The external assistant failed to respond".to_string(),
-                );
-            }
+    // No timeout, deliberately -- a real agent turn (file edits,
+    // service restarts, multi-step tool use) can legitimately run for
+    // minutes, and there's no way to distinguish "still working" from
+    // "hung" from out here. Found live: an earlier 60s cap (later
+    // raised to 660s) killed real, still-working tasks with a false
+    // "took too long" failure well before they'd actually have
+    // finished successfully. `scripts/openclaw-handoff` passes its own
+    // generous `--timeout` to the `openclaw` CLI itself as the actual
+    // backstop against a truly wedged gateway -- this call just waits
+    // for that process to exit, however long it takes.
+    let status = match child.wait() {
+        Ok(status) => status,
+        Err(e) => {
+            tracing::warn!("[router:openclaw] wait failed: {e}");
+            return (
+                false,
+                "The external assistant failed to respond".to_string(),
+            );
         }
     };
 

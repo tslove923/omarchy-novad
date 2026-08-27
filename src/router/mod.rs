@@ -280,6 +280,23 @@ pub fn looks_like_external_command(text: &str) -> bool {
     openclaw::looks_like_external_command(text)
 }
 
+/// Same recovery, MediaControl side -- see
+/// `media_control::looks_like_media_command`'s docs. Already used
+/// inside `route`'s own `SYSTEM_CONTROL` arm to catch the same
+/// confusion one level down; exposed here too so pipeline.rs's
+/// MEMORY_RETURN recovery chain can catch it before `route` is ever
+/// called, same as the Message/Telegram/OpenClaw checks.
+pub fn looks_like_media_command(text: &str) -> bool {
+    media_control::looks_like_media_command(text)
+}
+
+/// Same recovery, Home Assistant side -- see
+/// `home_assistant::looks_like_home_assistant_command`'s docs. Same
+/// reasoning as `looks_like_media_command` above.
+pub fn looks_like_home_assistant_command(text: &str) -> bool {
+    home_assistant::looks_like_home_assistant_command(text)
+}
+
 /// Execute a [`RouteResult::NeedsConfirmation`] command after the user
 /// approved it in the popup — dispatches on the `kind` that came back
 /// with it. `bluebubbles` mirrors `route`'s own parameter: `None` when

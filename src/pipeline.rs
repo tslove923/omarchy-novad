@@ -163,15 +163,28 @@ pub fn run_session(cfg: &PipelineConfig) {
     // openclaw what..." (a stray sentence-break inserted mid-word) --
     // route the full transcript instead of the classifier's own
     // argument extraction, which had already lost whatever didn't
-    // survive transcription. See router::looks_like_message_command /
-    // looks_like_telegram_command / looks_like_external_command's docs.
-    // Checked in this order (Message, then Telegram, then OpenClaw)
-    // only because Message was the one actually observed misfiring
-    // live first; the trigger word sets don't overlap so the order
-    // otherwise doesn't matter. This has to happen before
-    // `is_external_handoff` below, not after -- Coding/External never
-    // go through `route()` at all, so a recovery into `Intent::External`
-    // needs to reach that check, not this one's `route()` call.
+    // survive transcription. Five checks total: Message, Telegram,
+    // OpenClaw (see router::looks_like_message_command /
+    // looks_like_telegram_command / looks_like_external_command's
+    // docs), plus MediaControl/HomeAssistant (reusing the exact
+    // checkers route()'s own SYSTEM_CONTROL arm already uses one level
+    // down for the same confusion -- see
+    // router::looks_like_media_command / looks_like_home_assistant_command).
+    // Checked in this order only because Message was the one actually
+    // observed misfiring live first; the trigger word sets don't
+    // overlap so the order otherwise doesn't matter. Deliberately
+    // does NOT attempt every intent -- OpenApp/WebSearch/OpenWebsite/
+    // Terminal have no equivalent checker because none has an observed
+    // live misclassification to model one on; every checker in this
+    // codebase is built from a specific real failure, not a guess at a
+    // hypothetical one (see e.g. the Levenshtein comment in
+    // bluebubbles.rs), since an unvalidated heuristic risks recovering
+    // an already-correct MEMORY_RETURN into the wrong intent instead.
+    //
+    // This has to happen before `is_external_handoff` below, not after
+    // -- Coding/External never go through `route()` at all, so a
+    // recovery into `Intent::External` needs to reach that check, not
+    // this one's `route()` call.
     let (route_intent, route_argument) = if result.intent == Intent::MemoryReturn
         && cfg.bluebubbles.is_some()
         && router::looks_like_message_command(&transcript)
@@ -197,6 +210,30 @@ pub fn run_session(cfg: &PipelineConfig) {
              like a mis-heard OpenClaw trigger): {transcript:?}"
         );
         (Intent::External, transcript.clone())
+    } else if result.intent == Intent::MemoryReturn && router::looks_like_media_command(&transcript) {
+        // Reuses the same checker route()'s own SYSTEM_CONTROL arm
+        // already uses one level down -- extended here so it also
+        // catches the case where the classifier missed it entirely
+        // (MEMORY_RETURN) rather than only the SYSTEM_CONTROL/MEDIA_CONTROL
+        // mix-up that arm was built for.
+        tracing::info!(
+            "[pipeline] recovering misclassified MEMORY_RETURN as MEDIA_CONTROL (leading word \
+             looks like a media transport command): {transcript:?}"
+        );
+        (Intent::MediaControl, transcript.clone())
+    } else if result.intent == Intent::MemoryReturn
+        && cfg.home_assistant.is_some()
+        && router::looks_like_home_assistant_command(&transcript)
+    {
+        // Same reuse, Home Assistant side -- guarded on `home_assistant`
+        // being configured for the same reason route()'s own check is:
+        // don't claim a false "Home Assistant not configured" for a
+        // phrase that only coincidentally shares a verb.
+        tracing::info!(
+            "[pipeline] recovering misclassified MEMORY_RETURN as HOME_ASSISTANT (leading word \
+             looks like a device-control command): {transcript:?}"
+        );
+        (Intent::HomeAssistant, transcript.clone())
     } else {
         (result.intent, result.argument.clone())
     };

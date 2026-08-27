@@ -62,12 +62,14 @@ pub fn looks_like_external_command(text: &str) -> bool {
         .chars()
         .filter(|c| c.is_alphanumeric() || c.is_whitespace())
         .collect();
-    let leading = cleaned
-        .split_whitespace()
-        .take(6)
-        .collect::<Vec<_>>()
-        .join(" ");
-    leading.contains("openclaw") || leading.contains("open claw")
+    // Anywhere in the utterance, not just the leading words -- found
+    // live: "What's the status with Home Assistant? Ask OpenClaw."
+    // says it as a trailing afterthought, not a leading trigger word,
+    // and still unambiguously means "hand this off". A leading-only
+    // window was the right shape for the original ASR-mangled-trigger-
+    // word failure this was built for ("Ask open. Claw. what..."), but
+    // it's too narrow for how people actually phrase these.
+    cleaned.contains("openclaw") || cleaned.contains("open claw")
 }
 
 /// All wake-word-triggered handoffs share one conversation so OpenClaw
@@ -397,10 +399,26 @@ mod tests {
     }
 
     #[test]
-    fn does_not_fire_when_the_words_only_appear_much_later() {
-        // A long transcript that happens to mention "open" and "claw"
-        // unrelatedly, far past the leading-word window, shouldn't
-        // false-positive as an OpenClaw command.
+    fn catches_a_trailing_mention_too() {
+        // Observed live, reproduced three times in a row: saying
+        // "openclaw" as a trailing afterthought rather than a leading
+        // trigger word still unambiguously means "hand this off" --
+        // and the classifier read every one of these as HOME_ASSISTANT
+        // (not MEMORY_RETURN), since the utterance also names a topic
+        // that intent handles.
+        assert!(looks_like_external_command(
+            "What's the status with Home Assistant? Ask OpenClaw."
+        ));
+        assert!(looks_like_external_command(
+            "Ask OpenClaw what's the status with Home Assistant."
+        ));
+    }
+
+    #[test]
+    fn does_not_fire_on_words_that_only_coincidentally_appear_in_sequence() {
+        // "open" and "claw" appear back to back in spirit but not as
+        // the literal substring "open claw" -- "her" splits them --
+        // shouldn't false-positive as an OpenClaw command.
         assert!(!looks_like_external_command(
             "remind me to buy a new cat scratching post because the cat likes to open her claw \
              on the couch"

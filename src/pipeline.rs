@@ -151,41 +151,71 @@ pub fn run_session(cfg: &PipelineConfig) {
         result.latency.as_secs_f32()
     );
 
-    // Recovery: MEMORY_RETURN has no local handler (see router::route's
-    // doc comment), so it's a safe bucket to double-check rather than a
-    // risk of overriding a confident, actionable classification. If the
-    // *original* transcript's leading word(s) look like a MESSAGE,
-    // TELEGRAM, or OpenClaw trigger -- including a plausible ASR
-    // mis-hearing, e.g. "tax" for "text" (observed live: "text Jessica
-    // is this working?" came back transcribed as "Tax is this
-    // working.", which the classifier had no reason to read as anything
-    // but MEMORY_RETURN), or "Ask open. Claw. what..." for "ask
-    // openclaw what..." (a stray sentence-break inserted mid-word) --
-    // route the full transcript instead of the classifier's own
-    // argument extraction, which had already lost whatever didn't
-    // survive transcription. Five checks total: Message, Telegram,
-    // OpenClaw (see router::looks_like_message_command /
-    // looks_like_telegram_command / looks_like_external_command's
-    // docs), plus MediaControl/HomeAssistant (reusing the exact
-    // checkers route()'s own SYSTEM_CONTROL arm already uses one level
-    // down for the same confusion -- see
-    // router::looks_like_media_command / looks_like_home_assistant_command).
-    // Checked in this order only because Message was the one actually
-    // observed misfiring live first; the trigger word sets don't
-    // overlap so the order otherwise doesn't matter. Deliberately
-    // does NOT attempt every intent -- OpenApp/WebSearch/OpenWebsite/
-    // Terminal have no equivalent checker because none has an observed
-    // live misclassification to model one on; every checker in this
-    // codebase is built from a specific real failure, not a guess at a
-    // hypothetical one (see e.g. the Levenshtein comment in
-    // bluebubbles.rs), since an unvalidated heuristic risks recovering
-    // an already-correct MEMORY_RETURN into the wrong intent instead.
+    // Recovery, two tiers:
+    //
+    // 1. An explicit "openclaw"/"open claw" mention anywhere in the
+    //    transcript overrides *any* classifier guess (checked first,
+    //    below) -- found live that the classifier isn't just prone to
+    //    MEMORY_RETURN on these, it can land on almost any intent that
+    //    matches a topic word also present in the utterance (e.g. "Ask
+    //    OpenClaw what's the status with Home Assistant" -> HOME_ASSISTANT,
+    //    reproduced three times in a row). A literal "ask openclaw" is
+    //    about as unambiguous as this daemon's input ever gets.
+    //
+    // 2. MEMORY_RETURN has no local handler (see router::route's doc
+    //    comment) and only reaches this without the transcript
+    //    mentioning OpenClaw by name, so it's a safe bucket to
+    //    double-check rather than a risk of overriding a confident,
+    //    actionable classification: if the *original* transcript's
+    //    leading word(s) look like a MESSAGE or TELEGRAM trigger --
+    //    including a plausible ASR mis-hearing, e.g. "tax" for "text"
+    //    (observed live: "text Jessica is this working?" came back
+    //    transcribed as "Tax is this working.", which the classifier
+    //    had no reason to read as anything but MEMORY_RETURN) -- route
+    //    the full transcript instead of the classifier's own argument
+    //    extraction, which had already lost whatever didn't survive
+    //    transcription. Plus MediaControl/HomeAssistant (reusing the
+    //    exact checkers route()'s own SYSTEM_CONTROL arm already uses
+    //    one level down for the same confusion -- see
+    //    router::looks_like_media_command / looks_like_home_assistant_command).
+    //    Checked in this order only because Message was the one
+    //    actually observed misfiring live first; the trigger word sets
+    //    don't overlap so the order otherwise doesn't matter.
+    //    Deliberately does NOT attempt every intent -- OpenApp/
+    //    WebSearch/OpenWebsite/Terminal have no equivalent checker
+    //    because none has an observed live misclassification to model
+    //    one on; every checker in this codebase is built from a
+    //    specific real failure, not a guess at a hypothetical one (see
+    //    e.g. the Levenshtein comment in bluebubbles.rs), since an
+    //    unvalidated heuristic risks recovering an already-correct
+    //    MEMORY_RETURN into the wrong intent instead.
     //
     // This has to happen before `is_external_handoff` below, not after
     // -- Coding/External never go through `route()` at all, so a
     // recovery into `Intent::External` needs to reach that check, not
     // this one's `route()` call.
-    let (route_intent, route_argument) = if result.intent == Intent::MemoryReturn
+    let (route_intent, route_argument) = if !router::is_external_handoff(result.intent)
+        && router::looks_like_external_command(&transcript)
+    {
+        // Explicit "openclaw"/"open claw" anywhere in the transcript
+        // overrides *any* classifier guess, not just MEMORY_RETURN --
+        // found live, three times in a row: "Ask OpenClaw what's the
+        // status with Home Assistant" and its variants all came back
+        // HOME_ASSISTANT, not EXTERNAL, because the utterance also
+        // names a topic that intent handles. The classifier can
+        // apparently pick almost any intent this way when the
+        // utterance mentions a matching topic word; a literal "ask
+        // openclaw" is about as unambiguous a signal as this daemon
+        // ever gets, so it wins over whatever else got guessed. This
+        // subsumes (and runs before) the MEMORY_RETURN-specific
+        // OpenClaw check that used to be the only place this fired.
+        tracing::info!(
+            "[pipeline] overriding classifier's {:?} with EXTERNAL (transcript explicitly \
+             mentions openclaw): {transcript:?}",
+            result.intent
+        );
+        (Intent::External, transcript.clone())
+    } else if result.intent == Intent::MemoryReturn
         && cfg.bluebubbles.is_some()
         && router::looks_like_message_command(&transcript)
     {
@@ -203,13 +233,6 @@ pub fn run_session(cfg: &PipelineConfig) {
              like a mis-heard telegram trigger): {transcript:?}"
         );
         (Intent::Telegram, transcript.clone())
-    } else if result.intent == Intent::MemoryReturn && router::looks_like_external_command(&transcript)
-    {
-        tracing::info!(
-            "[pipeline] recovering misclassified MEMORY_RETURN as EXTERNAL (leading words look \
-             like a mis-heard OpenClaw trigger): {transcript:?}"
-        );
-        (Intent::External, transcript.clone())
     } else if result.intent == Intent::MemoryReturn && router::looks_like_media_command(&transcript) {
         // Reuses the same checker route()'s own SYSTEM_CONTROL arm
         // already uses one level down -- extended here so it also

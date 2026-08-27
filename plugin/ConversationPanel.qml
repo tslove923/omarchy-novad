@@ -39,6 +39,7 @@ PanelWindow {
     readonly property string phase: root.service ? root.service.conversationPhase : ""
     readonly property string pendingText: root.service ? root.service.conversationPendingText : ""
     readonly property var turns: root.service ? root.service.conversationTurns : []
+    readonly property bool handsFree: root.service ? root.service.conversationHandsFree : false
 
     visible: active
 
@@ -112,6 +113,10 @@ PanelWindow {
         if (root.service) root.service.rejectPending();
     }
 
+    function toggleHandsFree() {
+        if (root.service) root.service.setHandsFree(!root.handsFree);
+    }
+
     Rectangle {
         id: panel
 
@@ -144,12 +149,31 @@ PanelWindow {
                 font.weight: Font.Bold
             }
 
-            PopupButton {
+            Row {
                 anchors.right: parent.right
                 anchors.verticalCenter: parent.verticalCenter
-                label: "Stop"
-                tint: root.danger
-                onClicked: root.stopConversation()
+                spacing: 8
+
+                // Hands-free: once on, each turn skips "does this look
+                // good?" entirely -- talk back and forth with no
+                // confirm step. Off by default; the first message in a
+                // session is still reviewable unless this is already
+                // on when it's transcribed. See
+                // src/conversation/mod.rs's ConversationState::hands_free.
+                PopupButton {
+                    anchors.verticalCenter: parent.verticalCenter
+                    label: root.handsFree ? "Hands-Free: On" : "Hands-Free"
+                    tint: OmarchyTheme.green
+                    primary: root.handsFree
+                    onClicked: root.toggleHandsFree()
+                }
+
+                PopupButton {
+                    anchors.verticalCenter: parent.verticalCenter
+                    label: "Stop"
+                    tint: root.danger
+                    onClicked: root.stopConversation()
+                }
             }
         }
 

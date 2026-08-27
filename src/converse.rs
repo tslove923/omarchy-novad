@@ -97,13 +97,20 @@ pub fn run(cfg: &ConverseConfig, initial_utterance: Option<String>) -> anyhow::R
         phase: None,
         pending_text: None,
         turns: Vec::new(),
+        hands_free: false,
     };
     conversation::write_state(&state);
 
     let mut pending_utterance = initial_utterance;
+    let mut hands_free = false;
 
     loop {
-        if stop_requested(&control_rx) {
+        let stop = drain_control(&control_rx, &mut hands_free);
+        if state.hands_free != hands_free {
+            state.hands_free = hands_free;
+            conversation::write_state(&state);
+        }
+        if stop {
             break;
         }
 
@@ -135,7 +142,15 @@ pub fn run(cfg: &ConverseConfig, initial_utterance: Option<String>) -> anyhow::R
             break;
         }
 
-        let Some(confirmed) = confirm_utterance(cfg, &control_rx, &mut state, utterance) else {
+        // Hands-free skips the "does this look good?" step entirely --
+        // straight from Listening to Thinking, no UI grace window, no
+        // spoken confirm prompt. See ConversationState::hands_free.
+        let confirmed = if hands_free {
+            Some(utterance)
+        } else {
+            confirm_utterance(cfg, &control_rx, &mut state, &mut hands_free, utterance)
+        };
+        let Some(confirmed) = confirmed else {
             conversation::write_state(&state); // rejected or gave up -- listen fresh again
             continue;
         };
@@ -170,13 +185,35 @@ pub fn run(cfg: &ConverseConfig, initial_utterance: Option<String>) -> anyhow::R
     state.active = false;
     state.phase = None;
     state.pending_text = None;
+    state.hands_free = false;
     conversation::write_state(&state);
     Ok(())
 }
 
-fn stop_requested(control_rx: &Option<std::sync::mpsc::Receiver<ConversationAction>>) -> bool {
+/// Drains every control action queued right now (not just one) and
+/// applies the ones that make sense outside a confirm step:
+/// `HandsFree` toggles `hands_free` immediately regardless of which
+/// phase the loop is in, `Stop` is reported back so the caller can end
+/// the loop after its current turn. A stray `Confirm`/`Reject` that
+/// arrives with nothing waiting on it (not currently in
+/// `wait_for_ui_confirm`) is silently dropped, same as before this
+/// function existed -- draining fully (instead of the single
+/// `try_recv` this replaced) just means it no longer also swallows a
+/// `HandsFree` toggle queued right alongside it.
+fn drain_control(
+    control_rx: &Option<std::sync::mpsc::Receiver<ConversationAction>>,
+    hands_free: &mut bool,
+) -> bool {
     let Some(rx) = control_rx else { return false };
-    matches!(rx.try_recv(), Ok(ConversationAction::Stop))
+    let mut stop = false;
+    while let Ok(action) = rx.try_recv() {
+        match action {
+            ConversationAction::Stop => stop = true,
+            ConversationAction::HandsFree(v) => *hands_free = v,
+            ConversationAction::Confirm { .. } | ConversationAction::Reject => {}
+        }
+    }
+    stop
 }
 
 /// Shows `initial` as `pending_text` and gets it confirmed, editable,
@@ -196,16 +233,27 @@ fn confirm_utterance(
     cfg: &ConverseConfig,
     control_rx: &Option<std::sync::mpsc::Receiver<ConversationAction>>,
     state: &mut ConversationState,
+    hands_free: &mut bool,
     initial: String,
 ) -> Option<String> {
     let mut current = initial;
 
     for _ in 0..MAX_CONFIRM_ROUNDS {
+        // A HandsFree toggle can arrive mid-round (e.g. flipped on
+        // right after this turn's transcript came back) -- honor it
+        // immediately rather than finishing out this round's prompt.
+        if *hands_free {
+            state.pending_text = None;
+            state.hands_free = true;
+            conversation::write_state(state);
+            return Some(current);
+        }
+
         state.phase = Some(ConversationPhase::Confirming);
         state.pending_text = Some(current.clone());
         conversation::write_state(state);
 
-        match wait_for_ui_confirm(control_rx, &mut current, state) {
+        match wait_for_ui_confirm(control_rx, &mut current, state, hands_free) {
             Some(true) => {
                 state.pending_text = None;
                 return Some(current);
@@ -264,6 +312,7 @@ fn wait_for_ui_confirm(
     control_rx: &Option<std::sync::mpsc::Receiver<ConversationAction>>,
     current: &mut String,
     state: &mut ConversationState,
+    hands_free: &mut bool,
 ) -> Option<bool> {
     let Some(rx) = control_rx else { return None };
     let deadline = std::time::Instant::now() + UI_CONFIRM_GRACE;
@@ -277,13 +326,24 @@ fn wait_for_ui_confirm(
             }
             Ok(ConversationAction::Reject) => return Some(false),
             Ok(ConversationAction::Stop) => return Some(false),
+            Ok(ConversationAction::HandsFree(v)) => {
+                *hands_free = v;
+                state.hands_free = v;
+                conversation::write_state(state);
+                // Turning it on while a message is already pending
+                // confirmation counts as confirming that message too --
+                // "go hands-free from here" naturally includes the one
+                // that's on screen right now, not just future turns.
+                if v {
+                    return Some(true);
+                }
+            }
             Err(std::sync::mpsc::TryRecvError::Empty) => {
                 std::thread::sleep(Duration::from_millis(100));
             }
             Err(std::sync::mpsc::TryRecvError::Disconnected) => return None,
         }
     }
-    let _ = state; // reserved: a future revision may want to mark "grace expired" in state
     None
 }
 

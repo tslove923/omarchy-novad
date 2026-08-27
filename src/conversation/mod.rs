@@ -64,6 +64,16 @@ pub struct ConversationState {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pending_text: Option<String>,
     pub turns: Vec<ConversationTurn>,
+    /// When true, `converse::run`'s loop skips the "does this look
+    /// good?" confirmation step entirely (no UI grace window, no
+    /// spoken confirm prompt) and sends each transcript straight to
+    /// OpenClaw -- a real hands-free back-and-forth instead of
+    /// confirm-every-turn. Toggled by the UI's hands-free button (see
+    /// `ConversationPanel.qml`) or `omarchy-novad converse hands-free
+    /// <on|off>`; defaults off so the first message in a session is
+    /// still reviewable before it's sent.
+    #[serde(default)]
+    pub hands_free: bool,
 }
 
 pub fn state_path() -> PathBuf {
@@ -131,6 +141,8 @@ pub enum ConversationAction {
     Stop,
     Confirm { text: Option<String> },
     Reject,
+    /// Toggle hands-free mode -- see `ConversationState::hands_free`.
+    HandsFree(bool),
 }
 
 impl ConversationAction {
@@ -139,6 +151,8 @@ impl ConversationAction {
             "stop" => Some(Self::Stop),
             "confirm" => Some(Self::Confirm { text }),
             "reject" => Some(Self::Reject),
+            "hands_free_on" => Some(Self::HandsFree(true)),
+            "hands_free_off" => Some(Self::HandsFree(false)),
             _ => None,
         }
     }
@@ -230,4 +244,10 @@ pub fn confirm(text: Option<&str>) -> anyhow::Result<()> {
 /// good?" with no.
 pub fn reject() -> anyhow::Result<()> {
     send_action("reject", None)
+}
+
+/// `omarchy-novad converse hands-free <on|off>` entry point: toggle
+/// whether the running loop skips per-turn confirmation.
+pub fn set_hands_free(enabled: bool) -> anyhow::Result<()> {
+    send_action(if enabled { "hands_free_on" } else { "hands_free_off" }, None)
 }

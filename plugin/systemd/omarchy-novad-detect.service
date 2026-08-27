@@ -10,6 +10,12 @@ PartOf=graphical-session.target
 
 [Service]
 Type=simple
+# tracing::info!/warn!/error! are otherwise invisible in `journalctl
+# --user -u omarchy-novad-detect` -- this was a repeated blind spot
+# debugging wake-word/handoff issues live. debug/trace stays opt-in
+# (voice transcripts at that level) but info is safe and worth having
+# on by default.
+Environment=RUST_LOG=info
 # @NOVAD_BIN@ is substituted by ./setup at install time. No other
 # flags are passed on purpose: `omarchy-novad detect` reads
 # ~/.config/omarchy-novad/config.toml's [detect] section itself, and

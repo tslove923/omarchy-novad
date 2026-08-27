@@ -111,6 +111,9 @@ QtObject {
     // Array of { user_text, full_response, spoken_summary } objects,
     // oldest first -- see src/conversation/mod.rs's ConversationTurn.
     property var conversationTurns: []
+    // Skips per-turn "does this look good?" confirmation when on -- see
+    // src/conversation/mod.rs's ConversationState::hands_free.
+    property bool conversationHandsFree: false
 
     readonly property var latestTurn: conversationTurns.length > 0
         ? conversationTurns[conversationTurns.length - 1] : null
@@ -127,6 +130,7 @@ QtObject {
                 root.conversationPhase = parsed.phase || "";
                 root.conversationPendingText = parsed.pending_text || "";
                 root.conversationTurns = parsed.turns || [];
+                root.conversationHandsFree = parsed.hands_free || false;
             } catch (e) {
                 // Same non-atomic-write caveat as popup-state.json above.
             }
@@ -139,6 +143,7 @@ QtObject {
             root.conversationPhase = "";
             root.conversationPendingText = "";
             root.conversationTurns = [];
+            root.conversationHandsFree = false;
         }
 
         onFileChanged: reload()
@@ -155,28 +160,50 @@ QtObject {
     // can toggle the loop on/off through one Service action pair,
     // same as every other daemon action here.
     function startConversation() {
-        _converseProcess.command = [root.novadBinary, "converse", "start"];
-        _converseProcess.running = true;
+        // Own Process instance -- `converse start` is the long-running
+        // loop itself (blocks until `converse stop`/Ctrl+C, same
+        // process embodies the whole session), so it can't share a
+        // Process with the one-shot stop/confirm/reject commands below.
+        // Found live: it used to share one `_converseProcess` with all
+        // four actions, so once `start`'s process was running, setting
+        // `.running = true` again for a Confirm/Reject/Stop click was a
+        // no-op on an already-running Process -- the click's command
+        // never actually spawned. That's why Confirm/Stop appeared to
+        // do nothing from the panel/tray even though the CLI itself
+        // worked fine.
+        _converseStartProcess.command = [root.novadBinary, "converse", "start"];
+        _converseStartProcess.running = true;
     }
 
     function stopConversation() {
-        _converseProcess.command = [root.novadBinary, "converse", "stop"];
-        _converseProcess.running = true;
+        _converseControlProcess.command = [root.novadBinary, "converse", "stop"];
+        _converseControlProcess.running = true;
     }
 
     // Confirms (optionally with edited text) the pending transcript --
     // see src/conversation/mod.rs's ConversationAction.
     function confirmPending(text) {
-        _converseProcess.command = (text !== undefined && text !== null && text.length > 0)
+        _converseControlProcess.command = (text !== undefined && text !== null && text.length > 0)
             ? [root.novadBinary, "converse", "confirm", "--text", text]
             : [root.novadBinary, "converse", "confirm"];
-        _converseProcess.running = true;
+        _converseControlProcess.running = true;
     }
 
     function rejectPending() {
-        _converseProcess.command = [root.novadBinary, "converse", "reject"];
-        _converseProcess.running = true;
+        _converseControlProcess.command = [root.novadBinary, "converse", "reject"];
+        _converseControlProcess.running = true;
     }
 
-    property Process _converseProcess: Process { running: false }
+    function setHandsFree(enabled) {
+        _converseControlProcess.command = [root.novadBinary, "converse", "hands-free", enabled ? "on" : "off"];
+        _converseControlProcess.running = true;
+    }
+
+    property Process _converseStartProcess: Process { running: false }
+    // Reused across stop/confirm/reject -- each is a quick one-shot
+    // CLI call (connects to the running session's control socket,
+    // sends one action, exits), never overlapping with another one in
+    // practice (a human can't click Confirm and Reject in the same
+    // instant), unlike _converseStartProcess above.
+    property Process _converseControlProcess: Process { running: false }
 }

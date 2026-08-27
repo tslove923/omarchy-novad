@@ -235,6 +235,21 @@ enum ConverseCommand {
     },
     /// Answer a pending "does this look good?" prompt with no.
     Reject,
+    /// Toggle hands-free mode on a running `converse start` loop --
+    /// skips the "does this look good?" confirmation step per turn
+    /// (no UI grace window, no spoken prompt) for a real back-and-forth
+    /// voice conversation. Off by default so the first message in a
+    /// session is still reviewable.
+    HandsFree {
+        #[arg(value_enum)]
+        state: HandsFreeState,
+    },
+}
+
+#[derive(Clone, Copy, clap::ValueEnum)]
+enum HandsFreeState {
+    On,
+    Off,
 }
 
 #[derive(Subcommand)]
@@ -366,6 +381,9 @@ fn main() -> anyhow::Result<()> {
         Command::Converse {
             what: ConverseCommand::Reject,
         } => conversation::reject(),
+        Command::Converse {
+            what: ConverseCommand::HandsFree { state },
+        } => conversation::set_hands_free(matches!(state, HandsFreeState::On)),
     }
 }
 

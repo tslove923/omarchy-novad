@@ -472,6 +472,29 @@ from another terminal. `omarchy-novad converse start` runs the exact
 same loop by hand, without needing to say the wake word first —
 useful for testing, or starting a conversation from a script/keybind.
 
+### Binding it to a keybind
+
+Since `converse start` runs in the background and drives the
+conversation window/TTS on its own, it's a plain fire-and-forget exec
+-- no terminal needed. On Omarchy's Lua-based Hyprland config
+(`~/.config/hypr/bindings.lua`), add it the same way the existing
+`novad respond insert`/`novad respond cancel` bindings there work:
+
+```lua
+-- Start an OpenClaw voice conversation without needing the wake word.
+o.bind("SUPER + J", "Start OpenClaw conversation", "omarchy-novad converse start")
+```
+
+Plain Hyprland (`bind = ` syntax in `hyprland.conf`/`bindings.conf`)
+looks like:
+
+```
+bind = SUPER, J, exec, omarchy-novad converse start
+```
+
+Pick any key combo that isn't already bound — `hyprctl binds` (or
+Omarchy's own bindings list) shows what's already taken.
+
 Deliberately OpenClaw-only, no `[omapilot] fallback` here: OmaPilot's
 `askText` handoff never returns a real reply (see
 [OmaPilot integration](#omapilot-integration)'s `askText` discussion),

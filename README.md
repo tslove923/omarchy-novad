@@ -709,6 +709,14 @@ prompt in `src/classify/mod.rs`.
   `integrations/spotify.py` (OAuth + Web API playback control) — MPRIS
   alone covers local players; Spotify's own Web API would add
   search-and-play and remote-device control nova's original had.
+  Scaffolding already exists (`SpotifyConfig`/`save_spotify_tokens` in
+  `src/config.rs`, both `#[allow(dead_code)]`) but `router::spotify`
+  itself was never written -- no OAuth PKCE flow, no `omarchy-novad
+  setup spotify-auth` command, no search-and-play handler. Until then,
+  "play `<song>`" only sends a bare MPRIS Play to whatever's already
+  the active player (see `router/media_control.rs`'s doc comment); app
+  launch (`("spotify", "spotify-launcher")` in `app_launcher.rs`) and
+  opening `open.spotify.com` (`web.rs`) already work today.
 
 ## Credits
 

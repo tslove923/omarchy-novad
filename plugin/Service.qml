@@ -45,11 +45,13 @@ QtObject {
     // Whether the docked ConversationPanel is shown. Pure UI state (the
     // daemon neither knows nor cares about it) -- it lives here so the
     // bar widget's tray-icon click and the panel itself read/write one
-    // shared value. The panel auto-shows when a turn needs review
-    // (ConversationPanel binds `visible` to `panelVisible || phase ===
-    // "confirming"`), so hiding it never strands a pending transcript
-    // the user can't confirm.
-    property bool panelVisible: true
+    // shared value. Hidden by default: the panel only appears on a novad
+    // activation (a conversation starting or a turn entering "confirming"
+    // -- see the transition detection in _conversationStateView.onLoaded),
+    // a tray-icon click, or the SUPER+H key bind (which drives the host's
+    // `toggle` IPC through Overlay.qml's open()/close()). It never shows
+    // just because the shell started.
+    property bool panelVisible: false
 
     function togglePanel() {
         root.panelVisible = !root.panelVisible;
@@ -141,6 +143,14 @@ QtObject {
     // finishes.
     property string conversationStreamingText: ""
 
+    // Previous-turn state for the auto-show transition detection in
+    // _conversationStateView.onLoaded -- the panel pops open on a
+    // *transition* (conversation starting, or a turn entering
+    // "confirming"), not on a level, so an explicit tray/key-bind hide
+    // sticks until the next activation.
+    property bool _prevConversationActive: false
+    property string _prevConversationPhase: ""
+
     readonly property var latestTurn: conversationTurns.length > 0
         ? conversationTurns[conversationTurns.length - 1] : null
 
@@ -159,6 +169,19 @@ QtObject {
                 root.conversationThinkingElapsedSecs = (parsed.thinking_elapsed_secs !== undefined
                     && parsed.thinking_elapsed_secs !== null) ? parsed.thinking_elapsed_secs : -1;
                 root.conversationStreamingText = parsed.streaming_text || "";
+                // Auto-show on a novad activation: a conversation starting
+                // or a turn entering "confirming". Transition-based (not
+                // level-based) so an explicit tray/key-bind hide sticks
+                // until the *next* activation -- a running conversation
+                // alone doesn't keep re-popping the panel.
+                const wasActive = root._prevConversationActive;
+                const wasPhase = root._prevConversationPhase;
+                root._prevConversationActive = root.conversationActive;
+                root._prevConversationPhase = root.conversationPhase;
+                if ((root.conversationActive && !wasActive)
+                    || (root.conversationPhase === "confirming" && wasPhase !== "confirming")) {
+                    root.panelVisible = true;
+                }
             } catch (e) {
                 // Same non-atomic-write caveat as popup-state.json above.
             }
@@ -173,6 +196,8 @@ QtObject {
             root.conversationTurns = [];
             root.conversationThinkingElapsedSecs = -1;
             root.conversationStreamingText = "";
+            root._prevConversationActive = false;
+            root._prevConversationPhase = "";
         }
 
         onFileChanged: reload()
@@ -180,14 +205,15 @@ QtObject {
 
     // Starts the OpenClaw voice-conversation loop -- see
     // src/conversation/mod.rs's ConverseCommand::Start. The
-    // ConversationPanel (Overlay.qml) is a permanent docked window now
-    // (always visible, chat box always present), so this just flips the
-    // daemon loop on -- typing in the panel's chat box while no loop is
-    // running does the same thing via `converse start --text` (see
-    // `sendText`). Added alongside the pre-existing `stopConversation()`
-    // so BarWidget's context menu (nova's ported "OpenClaw Chat" item)
-    // can toggle the loop on/off through one Service action pair, same
-    // as every other daemon action here.
+    // ConversationPanel (Overlay.qml) is a permanent docked window
+    // (chat box always present, shown on a novad activation / tray /
+    // key bind), so this just flips the daemon loop on -- typing in the
+    // panel's chat box while no loop is running does the same thing via
+    // `converse start --text` (see `sendText`). Added alongside the
+    // pre-existing `stopConversation()` so BarWidget's context menu
+    // (nova's ported "OpenClaw Chat" item) can toggle the loop on/off
+    // through one Service action pair, same as every other daemon action
+    // here.
     function startConversation() {
         // Own Process instance -- `converse start` is the long-running
         // loop itself (blocks until `converse stop`/Ctrl+C, same

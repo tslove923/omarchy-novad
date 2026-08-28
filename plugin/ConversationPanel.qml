@@ -13,14 +13,17 @@
 // log (docked to the right edge, tall). See this plugin's README for
 // why both live under one `overlay` entry point instead of two.
 //
-// Unlike PopupCard, this window is *always* visible -- it's a permanent
-// docked chat window, not a transient card. The chat box at the bottom
-// is always present (typing into it starts a conversation when none is
-// running, or sends a new message mid-conversation -- see
-// service.sendText()), and OpenClaw's reply streams into the transcript
-// area live as it's produced (see Service.conversationStreamingText),
-// so output appears as the model writes it rather than all at once when
-// the turn completes.
+// Unlike PopupCard, this window is a permanent docked chat window, not
+// a transient card -- but it's hidden by default and only appears on a
+// novad activation (a conversation starting or a turn needing review), a
+// tray-icon click, or the SUPER+H key bind (see Service.panelVisible and
+// the transition detection in Service.qml's conversation-state watcher).
+// The chat box at the bottom is always present (typing into it starts a
+// conversation when none is running, or sends a new message
+// mid-conversation -- see service.sendText()), and OpenClaw's reply
+// streams into the transcript area live as it's produced (see
+// Service.conversationStreamingText), so output appears as the model
+// writes it rather than all at once when the turn completes.
 //
 // State comes from `service` (Overlay.qml's injected Service.qml
 // instance) instead of a local ConversationState file-watcher -- the
@@ -48,12 +51,13 @@ PanelWindow {
     readonly property int thinkingElapsedSecs: root.service ? root.service.conversationThinkingElapsedSecs : -1
     readonly property string streamingText: root.service ? root.service.conversationStreamingText : ""
 
-    // Visible unless the user hid it via the tray icon
-    // (service.togglePanel) -- but always pops back when a turn needs
-    // review, so hiding it never strands a pending transcript the user
-    // can't confirm. The empty state (no conversation running) shows
-    // the idle status + the always-present chat box.
-    visible: root.service ? (root.service.panelVisible || root.phase === "confirming") : true
+    // Visible only when the service says so: hidden by default, shown on
+    // a novad activation (conversation starting or a turn entering
+    // "confirming" -- Service.qml's transition detection), a tray-icon
+    // click, or the SUPER+H key bind. The service owns the auto-show
+    // logic so an explicit hide (tray/key bind) sticks until the next
+    // activation; this binding just mirrors `service.panelVisible`.
+    visible: root.service ? root.service.panelVisible : false
 
     anchors { top: true; bottom: true; left: true; right: true }
     color: "transparent"

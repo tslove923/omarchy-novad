@@ -54,6 +54,27 @@ Item {
     // with a service entry read shared state off `service`").
     property var service: null
 
+    // ── Host panel/overlay lifecycle contract ──────────────────────────
+    // docs/omarchy-shell.md: panel/overlay/menu entry points expose
+    // `open(payloadJson)` and `close()` for summon/hide, and the host's
+    // `isPluginOpen` prefers an `opened` property when one is defined.
+    // This overlay is keepLoaded (always mounted, never host-summoned
+    // for its own sake), but the SUPER+H key bind drives the host's
+    // `toggle` IPC (`omarchy-shell shell toggle <id>`), which calls these
+    // -- so they map straight onto the same `service.panelVisible` the
+    // tray icon and the service's auto-show already use. `opened` keeps
+    // `toggle` in sync with the panel's real state regardless of how it
+    // was last shown/hidden (tray, key bind, or novad activation).
+    readonly property bool opened: root.service ? root.service.panelVisible : false
+
+    function open(payloadJson) {
+        if (root.service) root.service.panelVisible = true;
+    }
+
+    function close() {
+        if (root.service) root.service.panelVisible = false;
+    }
+
     PopupCard {
         service: root.service
     }

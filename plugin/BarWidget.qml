@@ -114,10 +114,11 @@
 //     alongside this redesign -- stopConversation() already existed
 //     for the old quick-status popup's "Stop conversation" button).
 //     ConversationPanel (Overlay.qml) is a permanent docked window
-//     (always visible, chat box always present -- typing in it starts
-//     the loop via `converse start --text`), so this item just toggles
-//     the daemon loop itself; the label/action toggles based on
-//     `conversationActive` rather than always being "start".
+//     (hidden by default, shown on a novad activation / tray / key bind;
+//     chat box always present -- typing in it starts the loop via
+//     `converse start --text`), so this item just toggles the daemon
+//     loop itself; the label/action toggles based on `conversationActive`
+//     rather than always being "start".
 //   - "Config": ADAPTED to "Open Config File". There's no dedicated
 //     config UI/window anywhere in this project (unlike nova, which
 //     had `createConfigWindow()`) -- everything lives in one real

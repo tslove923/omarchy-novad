@@ -1,3 +1,4 @@
+mod chime;
 mod classify;
 mod config;
 mod conversation;
@@ -210,33 +211,28 @@ enum OpenclawCommand {
 #[derive(Subcommand)]
 enum ConverseCommand {
     /// Start the loop: wait for the user to trigger a recording, hand
-    /// the reviewed/edited transcript off to OpenClaw, show + speak
-    /// the reply, wait again -- never listens on its own, only when
-    /// asked (`converse listen`) -- until stopped (`converse stop`).
+    /// the transcript straight to OpenClaw (no review/confirm step --
+    /// see `converse::run`'s doc comment), show + speak the reply,
+    /// wait again -- never listens on its own, only when asked
+    /// (`converse listen`) -- until stopped (`converse stop`).
     Start {
-        /// Skip straight to reviewing this text instead of waiting for
-        /// a first recording -- e.g. from a wake-word trigger that
-        /// already captured an utterance.
+        /// Skip straight to the first turn's handoff instead of
+        /// waiting for a first recording -- e.g. from a wake-word
+        /// trigger that already captured an utterance.
         #[arg(long)]
         text: Option<String>,
         #[arg(long, default_value = "http://127.0.0.1:8420")]
         classify_base_url: String,
         #[arg(long, default_value = "qwen3-1.7b-instruct")]
         classify_model_id: String,
+        /// End the conversation on its own after this many seconds
+        /// idle between turns, waiting for a new recording -- see
+        /// `converse::ConverseConfig::idle_timeout`.
+        #[arg(long, default_value_t = converse::DEFAULT_IDLE_TIMEOUT_SECS)]
+        idle_timeout_secs: u64,
     },
     /// End a running `converse start` loop after its current turn.
     Stop,
-    /// Send the pending transcript to OpenClaw -- called by the
-    /// conversation window's edit box on Enter (with `--text` set to
-    /// whatever's in the box) or a UI Confirm/Send button.
-    Confirm {
-        /// Replace the pending transcript with this before sending it
-        /// on -- omit to send the transcript as transcribed.
-        #[arg(long)]
-        text: Option<String>,
-    },
-    /// Discard the pending transcript without sending it.
-    Reject,
     /// Start a new recording for the next turn (e.g. a "Record"
     /// button) -- the running loop never starts one on its own.
     Listen,
@@ -244,6 +240,15 @@ enum ConverseCommand {
     /// listening), same effect as voxtype's own silence-timeout just
     /// user-triggered.
     StopListening,
+    /// Single-key toggle for a `mode = "toggle"` talk-key bind: sends
+    /// `stop-listening` if currently listening, `listen` otherwise
+    /// (including barging in on Thinking/Speaking) -- see
+    /// `conversation::talk`'s doc comment. A `push_to_talk`-style bind
+    /// doesn't need this at all; it binds `listen`/`stop-listening`
+    /// directly to a key's press/release instead (Hyprland's
+    /// `bind`/`bindr`) -- see README's "Binding it to a keybind"
+    /// section for both recipes.
+    Talk,
     /// Send `text` as a new turn's utterance from the panel's
     /// always-present chat box -- the loop treats it exactly like a
     /// just-transcribed utterance, skipping the recording step. Fails
@@ -374,23 +379,27 @@ fn main() -> anyhow::Result<()> {
                     text,
                     classify_base_url,
                     classify_model_id,
+                    idle_timeout_secs,
                 },
-        } => run_converse_start(text, classify_base_url, classify_model_id, file_config.tts),
+        } => run_converse_start(
+            text,
+            classify_base_url,
+            classify_model_id,
+            idle_timeout_secs,
+            file_config.tts,
+        ),
         Command::Converse {
             what: ConverseCommand::Stop,
         } => conversation::stop(),
-        Command::Converse {
-            what: ConverseCommand::Confirm { text },
-        } => conversation::confirm(text.as_deref()),
-        Command::Converse {
-            what: ConverseCommand::Reject,
-        } => conversation::reject(),
         Command::Converse {
             what: ConverseCommand::Listen,
         } => conversation::listen(),
         Command::Converse {
             what: ConverseCommand::StopListening,
         } => conversation::stop_listening(),
+        Command::Converse {
+            what: ConverseCommand::Talk,
+        } => conversation::talk(),
         Command::Converse {
             what: ConverseCommand::SendText { text },
         } => conversation::send_text(&text),
@@ -460,6 +469,7 @@ fn run_converse_start(
     text: Option<String>,
     classify_base_url: String,
     classify_model_id: String,
+    idle_timeout_secs: u64,
     tts: config::TtsConfig,
 ) -> anyhow::Result<()> {
     println!("[omarchy-novad] Starting OpenClaw conversation. Ctrl+C, or 'omarchy-novad converse stop' from another terminal, to end it.");
@@ -470,6 +480,7 @@ fn run_converse_start(
         classify_base_url,
         classify_model_id,
         tts,
+        idle_timeout: std::time::Duration::from_secs(idle_timeout_secs),
     };
     converse::run(&cfg, text)
 }

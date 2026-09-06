@@ -313,6 +313,9 @@ pub fn run_session(cfg: &PipelineConfig) {
             classify_base_url: cfg.classify_base_url.clone(),
             classify_model_id: cfg.classify_model_id.clone(),
             tts: cfg.tts.clone(),
+            idle_timeout: std::time::Duration::from_secs(
+                crate::converse::DEFAULT_IDLE_TIMEOUT_SECS,
+            ),
         };
         let initial_utterance = router::strip_external_preamble(&transcript);
         if let Err(e) = crate::converse::run(&converse_cfg, Some(initial_utterance)) {

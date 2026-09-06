@@ -410,10 +410,11 @@ Then say the wake word and something open-ended ("what's the capital
 of France", "write a python script to sort a list") — this now enters
 the full conversation loop (see [OpenClaw voice
 conversation](#openclaw-voice-conversation-converse) below) rather
-than a one-shot exchange: it'll confirm what it heard, hand off to
-OpenClaw, show the full reply in the conversation window, speak a
-summary, and keep listening for your next turn until you say a stop
-phrase or run `omarchy-novad converse stop`.
+than a one-shot exchange: it hands what it heard straight to OpenClaw
+(no confirm step), shows the full reply in the conversation window,
+speaks a summary, then waits for you to trigger the next recording
+(`omarchy-novad converse listen`, e.g. a keybind or the panel's Record
+button) until you run `omarchy-novad converse stop`.
 
 ### Continuing a conversation in Herdr
 
@@ -461,19 +462,25 @@ This is what actually runs a genuine spoken back-and-forth with
 OpenClaw — and, since it's the default handler for
 `Intent::External`/`Intent::Coding`, it's what the automatic wake-word
 path enters too the moment you say something open-ended (see
-[Verify](#verify) above), not just a manually-run mode. It listens
-(reusing the same voxtype record/transcribe round-trip the wake-word
-pipeline uses), confirms what it heard, hands the utterance to
-OpenClaw (`router::handoff_external`, same `agent:main:novad:voice`
+[Verify](#verify) above), not just a manually-run mode. Each turn: you
+trigger a recording (`omarchy-novad converse listen` -- a keybind, or
+the panel's Record button; the daemon never starts one on its own
+between turns), voxtype records until its own silence-timeout or you
+end it early (`converse stop-listening`), and the transcript is handed
+straight to OpenClaw the moment it's ready -- no review/confirm step.
+`router::handoff_external` sends it (same `agent:main:novad:voice`
 session the plain one-shot handoff used to use — so context carries
-over the same way), shows OpenClaw's *full* reply in a dedicated
-Quickshell window (`quickshell/OpenClawConversation.qml`), speaks a
-shorter conversational summary of it out loud, then listens again —
-looping until you say a stop phrase ("stop conversation", "end
-conversation", "goodbye jarvis") or run `omarchy-novad converse stop`
-from another terminal. `omarchy-novad converse start` runs the exact
-same loop by hand, without needing to say the wake word first —
-useful for testing, or starting a conversation from a script/keybind.
+over the same way); OpenClaw's *full* reply shows in a dedicated
+Quickshell window (`quickshell/OpenClawConversation.qml`, or the
+plugin's `ConversationPanel.qml`), streaming in live as it's produced,
+and a shorter conversational summary of it is spoken out loud. The
+loop then waits for you to trigger the next recording again -- until
+you run `omarchy-novad converse stop`. `omarchy-novad converse start`
+runs the exact same loop by hand, without needing to say the wake word
+first — useful for testing, or starting a conversation from a
+script/keybind. See
+`docs/design-notes/conversation-flow-redesign.md` for the fuller
+design rationale (auto-send, barge-in, and other in-progress work).
 
 ### Binding it to a keybind
 
@@ -498,6 +505,46 @@ bind = SUPER, J, exec, omarchy-novad converse start
 Pick any key combo that isn't already bound — `hyprctl binds` (or
 Omarchy's own bindings list) shows what's already taken.
 
+### Talk-key bind (per-turn recording)
+
+The bind above starts the *conversation loop itself*. Once it's
+running, each turn still needs its own trigger — `omarchy-novad
+converse listen` starts a recording, `converse stop-listening` ends it
+early — the loop never listens on its own between turns (see [OpenClaw
+voice conversation](#openclaw-voice-conversation-converse) above).
+Pick whichever shape matches how you already think about push-to-talk:
+
+**`push_to_talk`** (hold to talk, release to stop) — Hyprland's
+`bindr` (release-triggered) covers the release half directly, no
+extra plumbing needed:
+
+```lua
+o.bind("SUPER + comma", "Talk to Jarvis", "omarchy-novad converse listen")
+o.bindr("SUPER + comma", "Stop talking", "omarchy-novad converse stop-listening")
+```
+
+```
+bind  = SUPER, comma, exec, omarchy-novad converse listen
+bindr = SUPER, comma, exec, omarchy-novad converse stop-listening
+```
+
+**`toggle`** (press once to start, press again to stop) — one bind,
+via `omarchy-novad converse talk`, which checks whether you're
+currently listening and sends the right action either way:
+
+```lua
+o.bind("SUPER + comma", "Talk to Jarvis (toggle)", "omarchy-novad converse talk")
+```
+
+```
+bind = SUPER, comma, exec, omarchy-novad converse talk
+```
+
+Either bind works at any point in a turn, not just while idle:
+pressing it again while OpenClaw is still "Thinking…" or mid-reply
+("Speaking…") barges in — the in-flight reply is abandoned/cut off and
+a new recording starts immediately, same as pressing it from idle.
+
 Deliberately OpenClaw-only, no `[omapilot] fallback` here: OmaPilot's
 `askText` handoff never returns a real reply (see
 [OmaPilot integration](#omapilot-integration)'s `askText` discussion),
@@ -519,14 +566,19 @@ word instead of typing it.
 
 ### How the spoken summary is derived
 
-OpenClaw's replies are often long/technical — not what you want read
-aloud verbatim. Each reply is condensed to 1-3 short spoken sentences
-via a second call to the same local LLM `omarchy-novad serve` already
-runs for classification (`[tts] `'s config doesn't need its own model —
+The handoff itself asks OpenClaw to answer the way it'd actually say
+the answer out loud — a genuine conversational reply, not a written
+report — so most replies are already short enough (a rough 40-word
+threshold) to speak verbatim, no second model call needed. Replies
+that come back long anyway (code, a multi-paragraph explanation, a
+real report) are condensed to 1-3 short spoken sentences via a second
+call to the same local LLM `omarchy-novad serve` already runs for
+classification (`[tts]`'s config doesn't need its own model —
 `--classify-base-url`/`--classify-model-id` on `converse start` point
 at the existing serve instance, same defaults as `detect`). If that
-summarization call fails for any reason, the full reply is spoken
-verbatim instead — a slower fallback, never silence.
+summarization call fails, the full reply is spoken verbatim instead —
+a slower fallback, never silence. Either way, the *displayed* reply in
+the conversation window is always OpenClaw's complete, unedited text.
 
 ### TTS backend (Kokoro, CPU)
 

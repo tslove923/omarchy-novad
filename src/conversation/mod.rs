@@ -10,16 +10,18 @@
 //!   (`quickshell/OpenClawConversation.qml`) watches it the same way
 //!   the popup watches `popup-state.json`.
 //! - **UI -> daemon**: `omarchy-novad converse
-//!   {stop,confirm,reject,listen,stop-listening}` connects to this
-//!   module's control socket and sends one JSON line -- same mechanism
-//!   as `popup::respond`, on a separate socket path so the two
-//!   features' state never mixes. A "Record" button runs `converse
+//!   {stop,listen,stop-listening,send-text}` connects to this module's
+//!   control socket and sends one JSON line -- same mechanism as
+//!   `popup::respond`, on a separate socket path so the two features'
+//!   state never mixes. A "Record" button (or a talk-key bind, see
+//!   `docs/design-notes/conversation-flow-redesign.md`) runs `converse
 //!   listen` to start a turn's recording (the daemon never starts one
 //!   on its own); a "stop recording" toggle runs `converse
-//!   stop-listening` to end it early. Once a transcript is up for
-//!   review, the conversation window's pending-text box runs `converse
-//!   confirm --text "<edited text>"` on Enter (an edit + send in one
-//!   action) and a Reject button runs `converse reject`.
+//!   stop-listening` to end it early. There is no review/confirm step
+//!   any more -- a transcript is sent to OpenClaw the moment it's
+//!   heard (see `converse::run`'s doc comment) -- so the only other
+//!   action is `send-text`, the panel's always-present chat box
+//!   sending a typed message as a fresh turn.
 
 use std::io::{BufRead as _, Write as _};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -32,12 +34,6 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "snake_case")]
 pub enum ConversationPhase {
     Listening,
-    /// Showing a just-transcribed utterance in `pending_text` and
-    /// asking "does this look good?" -- see `crate::converse`'s
-    /// confirm-before-send step. Distinct from `Listening` even though
-    /// it's also waiting on the mic, so the UI can show the pending
-    /// text + prompt rather than a bare "listening" indicator.
-    Confirming,
     Thinking,
     Speaking,
 }
@@ -49,9 +45,9 @@ pub struct ConversationTurn {
     /// conversation window.
     pub full_response: String,
     /// The shorter, spoken version derived from `full_response` (see
-    /// `converse`'s TL;DR parsing / `summarize_for_speech` fallback)
-    /// -- `None` when both failed and `full_response` was spoken
-    /// verbatim instead.
+    /// `converse::spoken_text_for`) -- `None` when `full_response` was
+    /// already short enough to speak verbatim, or when condensing a
+    /// long one failed and it was spoken verbatim as a fallback.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub spoken_summary: Option<String>,
 }
@@ -61,12 +57,17 @@ pub struct ConversationState {
     pub active: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub phase: Option<ConversationPhase>,
-    /// The most recent transcript, awaiting "does this look good?"
-    /// confirmation -- shown distinctly from committed `turns` so the
-    /// UI can offer an editable box for it. `None` once confirmed
-    /// (folded into a new `turns` entry) or rejected.
+    /// The current turn's utterance, already sent to OpenClaw -- set
+    /// the instant a transcript (or typed message) is handed off, so
+    /// the panel can show the outgoing bubble right away instead of
+    /// waiting for the reply to arrive before the user's own turn is
+    /// visible at all. `None` once the turn completes (folded into a
+    /// new `turns` entry) or while idle/listening. There is no
+    /// review/confirm step any more -- see `crate::converse::run`'s
+    /// doc comment -- this field is purely informational display
+    /// state, not a gate.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub pending_text: Option<String>,
+    pub pending_user_text: Option<String>,
     pub turns: Vec<ConversationTurn>,
     /// Seconds elapsed on the current OpenClaw handoff -- only
     /// meaningful while `phase == Some(Thinking)`. There's no timeout
@@ -81,7 +82,7 @@ pub struct ConversationState {
     /// panel renders this in place of a bare "Thinking…" so output
     /// appears as the model produces it, not all at once when the turn
     /// finishes. `None` when nothing is streaming (idle, listening,
-    /// confirming, speaking, or between turns). Cleared the moment the
+    /// speaking, or between turns). Cleared the moment the
     /// handoff returns; the full reply then lands in a new `turns`
     /// entry. See `converse::run_handoff_with_progress` and
     /// `router::openclaw::handoff_streaming`.
@@ -118,9 +119,9 @@ fn runtime_dir() -> PathBuf {
 /// `popup::write_state`'s doc comment for why (confirmed live: rapid
 /// truncate-and-rewrite of the same inode can permanently wedge
 /// Quickshell's `FileView` watch). This module's loop writes even more
-/// frequently per turn (listening/confirming/thinking/speaking, plus a
-/// fresh write per confirm-round correction) than the popup's, so it's
-/// if anything more exposed to the same bug.
+/// frequently per turn (listening/thinking/speaking, plus streamed
+/// deltas while thinking) than the popup's, so it's if anything more
+/// exposed to the same bug.
 pub fn write_state(state: &ConversationState) {
     let path = state_path();
     match serde_json::to_string(state) {
@@ -140,26 +141,18 @@ pub fn write_state(state: &ConversationState) {
 
 /// Actions the conversation window (or `omarchy-novad converse
 /// <action>`) can send back. `Listen` starts a new recording (e.g. a
-/// "Record" button) -- `converse::run` never starts one on its own
-/// between turns. `StopListening` ends an in-progress recording early
-/// (a "toggle" button while listening), same effect as voxtype's own
-/// silence-timeout just user-triggered. `Confirm`/`Reject` answer
-/// "send this?" for `pending_text` once a transcript is up for review
-/// -- no timeout, no voice fallback (see `converse::wait_for_review`).
-/// `Confirm`'s `text`, when present, is the edited pending text to
-/// send instead of the original transcript -- an edit and a send in
-/// one action, since the UI never needs to stage an edit without also
-/// deciding whether to send it. `SendText` is the panel's always-
-/// present chat box: a *fresh* user message, not an answer to a
-/// pending transcript. The loop treats it exactly like a just-
-/// transcribed utterance (skipping the recording step); if one is
-/// already up for review, the typed text wins and the pending
-/// transcript is discarded (see `converse::wait_for_review`).
+/// "Record" button, or a talk-key bind) -- `converse::run` never
+/// starts one on its own between turns. `StopListening` ends an
+/// in-progress recording early (a "toggle" button while listening),
+/// same effect as voxtype's own silence-timeout just user-triggered.
+/// `SendText` is the panel's always-present chat box: a *fresh* user
+/// message. The loop treats it exactly like a just-transcribed
+/// utterance (skipping the recording step) and sends it immediately,
+/// same as any other turn -- there is no review/confirm step to
+/// preempt any more (see `converse::run`'s doc comment).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConversationAction {
     Stop,
-    Confirm { text: Option<String> },
-    Reject,
     Listen,
     StopListening,
     SendText { text: String },
@@ -169,8 +162,6 @@ impl ConversationAction {
     fn from_wire(action: &str, text: Option<String>) -> Option<Self> {
         match action.trim() {
             "stop" => Some(Self::Stop),
-            "confirm" => Some(Self::Confirm { text }),
-            "reject" => Some(Self::Reject),
             "listen" => Some(Self::Listen),
             "stop_listening" => Some(Self::StopListening),
             "send_text" => Some(Self::SendText {
@@ -193,9 +184,9 @@ struct ControlMessage {
 }
 
 /// Listens on `control_socket_path()` for actions from
-/// `omarchy-novad converse {stop,confirm,reject}` and forwards them to
-/// `sender`. Runs until the listener errors (process teardown);
-/// intended to run on its own thread from `converse::run`.
+/// `omarchy-novad converse {stop,listen,stop-listening,send-text}` and
+/// forwards them to `sender`. Runs until the listener errors (process
+/// teardown); intended to run on its own thread from `converse::run`.
 pub struct ControlServer;
 
 impl ControlServer {
@@ -256,19 +247,6 @@ pub fn stop() -> anyhow::Result<()> {
     send_action("stop", None)
 }
 
-/// `omarchy-novad converse confirm [--text ...]` entry point: send the
-/// pending transcript (optionally replaced with an edited version
-/// first -- see `ConversationAction::Confirm`) to OpenClaw.
-pub fn confirm(text: Option<&str>) -> anyhow::Result<()> {
-    send_action("confirm", text)
-}
-
-/// `omarchy-novad converse reject` entry point: discard the pending
-/// transcript without sending it.
-pub fn reject() -> anyhow::Result<()> {
-    send_action("reject", None)
-}
-
 /// `omarchy-novad converse listen` entry point: start a new recording
 /// for the next turn (e.g. a "Record" button) -- the running loop
 /// never starts one on its own.
@@ -292,16 +270,67 @@ pub fn send_text(text: &str) -> anyhow::Result<()> {
     send_action("send_text", Some(text))
 }
 
+/// `omarchy-novad converse talk` entry point: a single-key toggle for
+/// a `mode = "toggle"` talk-key bind (see
+/// `docs/design-notes/conversation-flow-redesign.md`'s "Trigger"
+/// section -- `push_to_talk` mode doesn't need this at all, it binds
+/// `listen`/`stop-listening` directly to a key's press/release via
+/// Hyprland's `bind`/`bindr`). Reads the daemon's own state file (the
+/// same one the panel watches) to decide which action to send: press
+/// while `Listening` sends `stop-listening` (end the recording early);
+/// press in any other phase -- idle, Thinking, or Speaking -- sends
+/// `listen` (start a new recording, or barge in on Thinking/Speaking,
+/// same as the panel's Record button would). Fails (no socket) if no
+/// `converse start` loop is running -- same as `listen`/
+/// `stop-listening` themselves; there's no "also start a conversation"
+/// fallback here, that's a separate `converse start` bind's job.
+pub fn talk() -> anyhow::Result<()> {
+    if should_stop_listening(read_phase().as_deref()) {
+        stop_listening()
+    } else {
+        listen()
+    }
+}
+
+/// The decision half of `talk()`, split out as a pure function so it's
+/// testable without a real state file on disk.
+fn should_stop_listening(phase: Option<&str>) -> bool {
+    phase == Some("listening")
+}
+
+/// Reads just the `phase` field out of the current state file, best-
+/// effort -- `None` on any read/parse failure (no conversation ever
+/// started, a torn read mid-write, the file simply not existing yet)
+/// is treated by `talk()` the same as "not listening", which is the
+/// safe default (it sends `listen`, matching what happens when the
+/// state genuinely is idle).
+fn read_phase() -> Option<String> {
+    let text = std::fs::read_to_string(state_path()).ok()?;
+    let value: serde_json::Value = serde_json::from_str(&text).ok()?;
+    value.get("phase")?.as_str().map(String::from)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{ConversationAction, ConversationPhase, ConversationState, ConversationTurn};
+    use super::{
+        should_stop_listening, ConversationAction, ConversationPhase, ConversationState,
+        ConversationTurn,
+    };
+
+    #[test]
+    fn should_stop_listening_only_when_actually_listening() {
+        assert!(should_stop_listening(Some("listening")));
+        assert!(!should_stop_listening(Some("thinking")));
+        assert!(!should_stop_listening(Some("speaking")));
+        assert!(!should_stop_listening(None)); // idle, or no state file yet
+    }
 
     #[test]
     fn state_serializes_streaming_text_when_present() {
         let state = ConversationState {
             active: true,
             phase: Some(ConversationPhase::Thinking),
-            pending_text: None,
+            pending_user_text: None,
             turns: Vec::new(),
             thinking_elapsed_secs: Some(3),
             streaming_text: Some("The capital of France is Par".to_string()),
@@ -316,7 +345,7 @@ mod tests {
         let state = ConversationState {
             active: true,
             phase: None,
-            pending_text: None,
+            pending_user_text: None,
             turns: Vec::new(),
             thinking_elapsed_secs: None,
             streaming_text: None,
@@ -331,7 +360,7 @@ mod tests {
         let state = ConversationState {
             active: true,
             phase: Some(ConversationPhase::Speaking),
-            pending_text: None,
+            pending_user_text: None,
             turns: vec![ConversationTurn {
                 user_text: "hi".to_string(),
                 full_response: "Hello!".to_string(),
@@ -369,16 +398,6 @@ mod tests {
         assert_eq!(
             ConversationAction::from_wire("stop", None),
             Some(ConversationAction::Stop)
-        );
-        assert_eq!(
-            ConversationAction::from_wire("confirm", Some("edited".to_string())),
-            Some(ConversationAction::Confirm {
-                text: Some("edited".to_string())
-            })
-        );
-        assert_eq!(
-            ConversationAction::from_wire("reject", None),
-            Some(ConversationAction::Reject)
         );
         assert_eq!(
             ConversationAction::from_wire("listen", None),

@@ -23,12 +23,13 @@ QtObject {
     }
 
     property bool active: false
-    // "listening" | "confirming" | "thinking" | "speaking" | "" (absent/no phase).
+    // "listening" | "thinking" | "speaking" | "" (absent/no phase).
     property string phase: ""
-    // The just-transcribed utterance awaiting "does this look good?"
-    // confirmation, or "" when there's nothing pending -- only
-    // meaningful while phase === "confirming".
-    property string pendingText: ""
+    // The current turn's utterance, already sent -- shown as the
+    // outgoing bubble immediately, before the reply lands (no
+    // review/confirm step, see src/converse.rs's doc comment). "" once
+    // the turn completes or while idle/listening.
+    property string pendingUserText: ""
     // Array of { user_text, full_response, spoken_summary } objects,
     // oldest first -- see src/conversation/mod.rs's ConversationTurn.
     property var turns: []
@@ -47,7 +48,7 @@ QtObject {
                 const parsed = JSON.parse(text());
                 root.active = parsed.active || false;
                 root.phase = parsed.phase || "";
-                root.pendingText = parsed.pending_text || "";
+                root.pendingUserText = parsed.pending_user_text || "";
                 root.turns = parsed.turns || [];
                 root.streamingText = parsed.streaming_text || "";
             } catch (e) {
@@ -61,7 +62,7 @@ QtObject {
         onLoadFailed: {
             root.active = false;
             root.phase = "";
-            root.pendingText = "";
+            root.pendingUserText = "";
             root.turns = [];
             root.streamingText = "";
         }

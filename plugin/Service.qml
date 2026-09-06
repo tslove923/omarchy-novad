@@ -46,7 +46,7 @@ QtObject {
     // daemon neither knows nor cares about it) -- it lives here so the
     // bar widget's tray-icon click and the panel itself read/write one
     // shared value. Hidden by default: the panel only appears on a novad
-    // activation (a conversation starting or a turn entering "confirming"
+    // activation (a conversation starting or a turn entering "thinking"
     // -- see the transition detection in _conversationStateView.onLoaded),
     // a tray-icon click, or the SUPER+H key bind (which drives the host's
     // `toggle` IPC through Overlay.qml's open()/close()). It never shows
@@ -118,14 +118,16 @@ QtObject {
     // quickshell/ConversationState.qml's fields exactly.
 
     property bool conversationActive: false
-    // "listening" | "confirming" | "thinking" | "speaking" | "" (idle,
-    // waiting for the user to trigger a recording, or absent/no phase
-    // before the very first turn).
+    // "listening" | "thinking" | "speaking" | "" (idle, waiting for
+    // the user to trigger a recording, or absent/no phase before the
+    // very first turn).
     property string conversationPhase: ""
-    // The just-transcribed utterance awaiting review/send, or "" when
-    // there's nothing pending -- only meaningful while
-    // conversationPhase === "confirming".
-    property string conversationPendingText: ""
+    // The current turn's utterance, already sent to OpenClaw -- shown
+    // as the outgoing chat bubble immediately, before the reply lands
+    // (there's no review/confirm step any more, see
+    // src/converse.rs's doc comment). "" once the turn completes
+    // (folded into conversationTurns) or while idle/listening.
+    property string conversationPendingUserText: ""
     // Array of { user_text, full_response, spoken_summary } objects,
     // oldest first -- see src/conversation/mod.rs's ConversationTurn.
     property var conversationTurns: []
@@ -146,7 +148,7 @@ QtObject {
     // Previous-turn state for the auto-show transition detection in
     // _conversationStateView.onLoaded -- the panel pops open on a
     // *transition* (conversation starting, or a turn entering
-    // "confirming"), not on a level, so an explicit tray/key-bind hide
+    // "thinking"), not on a level, so an explicit tray/key-bind hide
     // sticks until the next activation.
     property bool _prevConversationActive: false
     property string _prevConversationPhase: ""
@@ -164,22 +166,24 @@ QtObject {
                 const parsed = JSON.parse(text());
                 root.conversationActive = parsed.active || false;
                 root.conversationPhase = parsed.phase || "";
-                root.conversationPendingText = parsed.pending_text || "";
+                root.conversationPendingUserText = parsed.pending_user_text || "";
                 root.conversationTurns = parsed.turns || [];
                 root.conversationThinkingElapsedSecs = (parsed.thinking_elapsed_secs !== undefined
                     && parsed.thinking_elapsed_secs !== null) ? parsed.thinking_elapsed_secs : -1;
                 root.conversationStreamingText = parsed.streaming_text || "";
                 // Auto-show on a novad activation: a conversation starting
-                // or a turn entering "confirming". Transition-based (not
-                // level-based) so an explicit tray/key-bind hide sticks
-                // until the *next* activation -- a running conversation
-                // alone doesn't keep re-popping the panel.
+                // or a turn entering "thinking" (the point a transcript --
+                // or typed message -- has just been sent, once per turn).
+                // Transition-based (not level-based) so an explicit
+                // tray/key-bind hide sticks until the *next* activation --
+                // a running conversation alone doesn't keep re-popping the
+                // panel.
                 const wasActive = root._prevConversationActive;
                 const wasPhase = root._prevConversationPhase;
                 root._prevConversationActive = root.conversationActive;
                 root._prevConversationPhase = root.conversationPhase;
                 if ((root.conversationActive && !wasActive)
-                    || (root.conversationPhase === "confirming" && wasPhase !== "confirming")) {
+                    || (root.conversationPhase === "thinking" && wasPhase !== "thinking")) {
                     root.panelVisible = true;
                 }
             } catch (e) {
@@ -192,7 +196,7 @@ QtObject {
         onLoadFailed: {
             root.conversationActive = false;
             root.conversationPhase = "";
-            root.conversationPendingText = "";
+            root.conversationPendingUserText = "";
             root.conversationTurns = [];
             root.conversationThinkingElapsedSecs = -1;
             root.conversationStreamingText = "";
@@ -218,34 +222,19 @@ QtObject {
         // Own Process instance -- `converse start` is the long-running
         // loop itself (blocks until `converse stop`/Ctrl+C, same
         // process embodies the whole session), so it can't share a
-        // Process with the one-shot stop/confirm/reject commands below.
-        // Found live: it used to share one `_converseProcess` with all
-        // four actions, so once `start`'s process was running, setting
-        // `.running = true` again for a Confirm/Reject/Stop click was a
-        // no-op on an already-running Process -- the click's command
-        // never actually spawned. That's why Confirm/Stop appeared to
-        // do nothing from the panel/tray even though the CLI itself
-        // worked fine.
+        // Process with the one-shot control commands below. Found
+        // live: it used to share one `_converseProcess` with all
+        // actions, so once `start`'s process was running, setting
+        // `.running = true` again for a Stop click was a no-op on an
+        // already-running Process -- the click's command never
+        // actually spawned. That's why Stop appeared to do nothing
+        // from the panel/tray even though the CLI itself worked fine.
         _converseStartProcess.command = [root.novadBinary, "converse", "start"];
         _converseStartProcess.running = true;
     }
 
     function stopConversation() {
         _converseControlProcess.command = [root.novadBinary, "converse", "stop"];
-        _converseControlProcess.running = true;
-    }
-
-    // Confirms (optionally with edited text) the pending transcript --
-    // see src/conversation/mod.rs's ConversationAction.
-    function confirmPending(text) {
-        _converseControlProcess.command = (text !== undefined && text !== null && text.length > 0)
-            ? [root.novadBinary, "converse", "confirm", "--text", text]
-            : [root.novadBinary, "converse", "confirm"];
-        _converseControlProcess.running = true;
-    }
-
-    function rejectPending() {
-        _converseControlProcess.command = [root.novadBinary, "converse", "reject"];
         _converseControlProcess.running = true;
     }
 
@@ -271,8 +260,8 @@ QtObject {
     // socket (`converse send-text`); if not, starting the loop with
     // `--text` seeds the first turn with it (see src/converse.rs's
     // `run`'s `initial_utterance`). Either way the typed text skips
-    // the recording step and lands in the same review/edit step as a
-    // transcript.
+    // the recording step and is sent immediately, same as any other
+    // turn.
     function sendText(text) {
         if (root.conversationActive) {
             _converseControlProcess.command = [root.novadBinary, "converse", "send-text", "--text", text];
@@ -284,7 +273,7 @@ QtObject {
     }
 
     property Process _converseStartProcess: Process { running: false }
-    // Reused across stop/confirm/reject/listen/stop-listening -- each
+    // Reused across stop/listen/stop-listening/send-text -- each
     // is a quick one-shot CLI call (connects to the running session's
     // control socket, sends one action, exits), never overlapping with
     // another one in practice (a human can't click two of these

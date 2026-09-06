@@ -21,10 +21,21 @@
 //! `paplay` as it arrives, so playback of sentence N overlaps
 //! synthesis of sentence N+1 instead of waiting for the whole
 //! response to finish.
+//!
+//! `speak()` takes a `cancel` flag so a caller running it on its own
+//! thread (see `converse::speak_with_barge_in`) can interrupt
+//! mid-reply -- barging in on "Speaking..." should stop the audio
+//! promptly, not queue behind it. Both `speak()`'s between-sentence
+//! check and `play()`'s own poll loop watch the same flag; `play()`
+//! polls it via `Child::try_wait()` rather than a blocking
+//! `Child::wait()`, so a cancel mid-sentence kills `paplay` right away
+//! instead of waiting for that sentence to finish playing first.
 
 use std::io::{Read, Write};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
+use std::time::Duration;
 
 use crate::config::TtsConfig;
 
@@ -55,10 +66,13 @@ fn split_sentences(text: &str) -> Vec<String> {
 
 /// Synthesizes and speaks `text` sentence-by-sentence via the
 /// configured TTS server + `paplay`. Blocks until playback of the
-/// whole response finishes. A sentence that fails to synthesize or
-/// play is logged and skipped rather than aborting the rest -- one bad
-/// sentence shouldn't silence the whole reply.
-pub fn speak(text: &str, cfg: &TtsConfig) -> anyhow::Result<()> {
+/// whole response finishes, `cancel` is set, or the caller drops its
+/// end (nothing else references it, since this is meant to run on its
+/// own thread -- see `converse::speak_with_barge_in`). A sentence that
+/// fails to synthesize or play is logged and skipped rather than
+/// aborting the rest -- one bad sentence shouldn't silence the whole
+/// reply.
+pub fn speak(text: &str, cfg: &TtsConfig, cancel: &AtomicBool) -> anyhow::Result<()> {
     let sentences = split_sentences(text);
     if sentences.is_empty() {
         return Ok(());
@@ -81,7 +95,10 @@ pub fn speak(text: &str, cfg: &TtsConfig) -> anyhow::Result<()> {
     });
 
     for wav in rx {
-        if let Err(e) = play(&wav) {
+        if cancel.load(Ordering::Relaxed) {
+            break; // don't start another sentence once cancelled
+        }
+        if let Err(e) = play(&wav, cancel) {
             tracing::warn!("[tts] playback failed: {e}");
         }
     }
@@ -107,7 +124,12 @@ fn synthesize(base_url: &str, voice: &str, text: &str) -> anyhow::Result<Vec<u8>
 /// this crate already uses for external tools (`voxtype`,
 /// `openclaw-handoff`, `herdr`) rather than pulling in an
 /// audio-output crate for the first time just for this.
-fn play(wav_bytes: &[u8]) -> anyhow::Result<()> {
+///
+/// Polls `cancel` via `Child::try_wait()` instead of a blocking
+/// `Child::wait()` so a barge-in mid-sentence kills `paplay`
+/// immediately rather than waiting for it to finish this sentence
+/// first -- see this module's doc comment.
+fn play(wav_bytes: &[u8], cancel: &AtomicBool) -> anyhow::Result<()> {
     let mut child = Command::new("paplay")
         .stdin(Stdio::piped())
         .spawn()
@@ -117,11 +139,22 @@ fn play(wav_bytes: &[u8]) -> anyhow::Result<()> {
             .write_all(wav_bytes)
             .map_err(|e| anyhow::anyhow!("write to paplay stdin: {e}"))?;
     }
-    let status = child
-        .wait()
-        .map_err(|e| anyhow::anyhow!("wait for paplay: {e}"))?;
-    if !status.success() {
-        anyhow::bail!("paplay exited with {status}");
+
+    loop {
+        if cancel.load(Ordering::Relaxed) {
+            let _ = child.kill();
+            let _ = child.wait(); // reap -- avoid leaving a zombie behind
+            return Ok(());
+        }
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                if !status.success() {
+                    anyhow::bail!("paplay exited with {status}");
+                }
+                return Ok(());
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(30)),
+            Err(e) => return Err(anyhow::anyhow!("wait for paplay: {e}")),
+        }
     }
-    Ok(())
 }

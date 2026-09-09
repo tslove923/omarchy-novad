@@ -35,6 +35,13 @@
 // `keepLoaded` Loaders instead of one, for no behavioral difference --
 // revisit this if a future surface here ever needs independent
 // enable/disable from shell.json.
+//
+// A third surface, VoiceVisualizer, joined later: the ambient voice
+// node (ported from OmaPilot's own Ambient.qml, see
+// voice-node/README.md), purely presentational and input-inert, no
+// PanelWindow of its own declared here -- it owns one internally (see
+// voice-node/VoiceNode.qml). Same one-overlay-many-surfaces reasoning
+// applies.
 
 import QtQuick
 
@@ -80,6 +87,10 @@ Item {
     }
 
     ConversationPanel {
+        service: root.service
+    }
+
+    VoiceVisualizer {
         service: root.service
     }
 }

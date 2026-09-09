@@ -66,6 +66,15 @@ pub struct PipelineConfig {
     /// branch, which now enters the full conversation loop rather
     /// than a one-shot handoff.
     pub tts: crate::config::TtsConfig,
+    /// Confirm-popup auto-approve behavior -- see
+    /// `config::PopupConfig`. Carried through to every `PopupState`
+    /// write below so the QML side knows the current setting without
+    /// its own config-file reader.
+    pub popup: crate::config::PopupConfig,
+    /// Whether `crate::converse`'s audio cues play -- see
+    /// `config::ChimeConfig`. Carried into `converse::ConverseConfig`
+    /// below (the `is_external_handoff` branch).
+    pub chime: crate::config::ChimeConfig,
 }
 
 /// Run one full session after a wake-word detection: start voxtype
@@ -81,6 +90,7 @@ pub fn run_session(cfg: &PipelineConfig) {
         text: String::new(),
         confirm_label: None,
         editable: false,
+        ..PopupState::default()
     });
 
     let transcript = match listen_and_transcribe(
@@ -115,6 +125,7 @@ pub fn run_session(cfg: &PipelineConfig) {
                 text: remainder.to_string(),
                 confirm_label: None,
                 editable: false,
+                ..PopupState::default()
             });
             let (success, message) = router::ask_omapilot(remainder, cfg);
             tracing::info!(
@@ -130,6 +141,7 @@ pub fn run_session(cfg: &PipelineConfig) {
         text: transcript.clone(),
         confirm_label: None,
         editable: false,
+        ..PopupState::default()
     });
 
     let classifier = Classifier::new(cfg.classify_base_url.clone(), cfg.classify_model_id.clone());
@@ -316,6 +328,7 @@ pub fn run_session(cfg: &PipelineConfig) {
             idle_timeout: std::time::Duration::from_secs(
                 crate::converse::DEFAULT_IDLE_TIMEOUT_SECS,
             ),
+            chimes_enabled: cfg.chime.enabled,
         };
         let initial_utterance = router::strip_external_preamble(&transcript);
         if let Err(e) = crate::converse::run(&converse_cfg, Some(initial_utterance)) {
@@ -350,6 +363,8 @@ pub fn run_session(cfg: &PipelineConfig) {
                 text: body,
                 confirm_label: label,
                 editable,
+                auto_approve: cfg.popup.auto_approve,
+                auto_approve_timeout_secs: cfg.popup.auto_approve_timeout_secs,
             });
             match wait_for_action() {
                 Some(PopupAction::Approve { edited_text }) => {
@@ -425,9 +440,15 @@ fn start_recording(
     // fresh one for some reason.
     let _ = std::fs::remove_file(transcript_path);
 
+    // --no-osd: every listen this project ever starts is already shown
+    // by plugin/VoiceVisualizer.qml's ambient node -- voxtype's own
+    // waveform OSD showing too was two indicators for one recording.
+    // Suppresses it for just this one session (voxtype's own
+    // --no-osd_override sentinel, consumed and removed on read), so a
+    // normal manual dictation hotkey press elsewhere is unaffected.
     let file_arg = format!("--file={}", transcript_path.display());
     let status = std::process::Command::new(voxtype_binary)
-        .args(["record", "start", &file_arg])
+        .args(["record", "start", &file_arg, "--no-osd"])
         .status()?;
     if !status.success() {
         return Err(std::io::Error::other(format!(
@@ -485,6 +506,7 @@ fn show_ready_and_wait(text: &str) {
         text: text.to_string(),
         confirm_label: None,
         editable: false,
+        ..PopupState::default()
     });
     // Ready is dismiss-on-timeout, not dismiss-on-action -- nova's own
     // popup auto-hid the result after a few seconds rather than

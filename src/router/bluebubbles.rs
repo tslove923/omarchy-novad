@@ -164,17 +164,24 @@ fn alphanumeric_only(s: &str) -> String {
     s.chars().filter(|c| c.is_alphanumeric()).collect()
 }
 
-/// Parsed voice command: who to message and what to say.
-struct ParsedMessage {
-    name: String,
-    text: String,
+/// Parsed voice command: who to message and what to say. When a
+/// CONNECTORS word ("saying"/"that") explicitly separates them, the
+/// split is unambiguous. Without one, the name/message boundary can't
+/// be known from the words alone -- "Jessica Love I'll be home soon"
+/// needs to know that "Jessica Love" is a real contact before it can
+/// tell the name stops there rather than at "Jessica" -- so that case
+/// defers the split to `resolve_name_and_message`, which tries it
+/// against real contacts. See that function's doc comment for why: a
+/// fixed first-word-only split (the old behavior here) sent "Love I'll
+/// be home soon" as the message body every time the contact's full
+/// name was needed to disambiguate her from someone else.
+enum ParsedMessage {
+    Connector { name: String, text: String },
+    NoConnector { words: Vec<String> },
 }
 
-/// Parse a natural-language message command into (contact name, message
-/// text). Handles the common phrasings directly; anything genuinely
-/// ambiguous falls back to "first word is the name, rest is the
-/// message" -- simple and predictable rather than a full NLP parser, the
-/// same trade-off `home_assistant::parse_command` makes.
+/// Parse a natural-language message command into a name/message split
+/// (see [`ParsedMessage`]). Handles the common phrasings directly.
 fn parse_command(arg: &str) -> Option<ParsedMessage> {
     let trimmed = arg.trim();
     if trimmed.is_empty() {
@@ -198,7 +205,7 @@ fn parse_command(arg: &str) -> Option<ParsedMessage> {
             let name = rest[..pos].trim();
             let text = rest[pos + connector.len()..].trim();
             if !name.is_empty() && !text.is_empty() {
-                return Some(ParsedMessage {
+                return Some(ParsedMessage::Connector {
                     name: name.to_string(),
                     text: text.to_string(),
                 });
@@ -206,15 +213,16 @@ fn parse_command(arg: &str) -> Option<ParsedMessage> {
         }
     }
 
-    // No connector found: first word is the name, everything else is
-    // the message (e.g. "sarah running late" -> "sarah" / "running late").
-    let mut words = rest.split_whitespace();
-    let name = words.next()?.to_string();
-    let text: String = words.collect::<Vec<_>>().join(" ");
-    if text.is_empty() {
+    // No connector found: the name/message boundary is unknown until
+    // resolved against real contacts -- see `ParsedMessage`'s doc
+    // comment. Need at least two words (a one-word name, one-word
+    // message minimum); `resolve_name_and_message` does the actual
+    // split.
+    let words: Vec<String> = rest.split_whitespace().map(String::from).collect();
+    if words.len() < 2 {
         return None;
     }
-    Some(ParsedMessage { name, text })
+    Some(ParsedMessage::NoConnector { words })
 }
 
 /// Fallback for when no `LEADING_PHRASES` prefix matched exactly:
@@ -493,6 +501,144 @@ fn resolve(name: &str, cfg: &BlueBubblesConfig) -> Result<Resolved, String> {
     })
 }
 
+/// Most words a spoken contact name is ever tried as, before
+/// `resolve_name_and_message` gives up on anything longer and falls
+/// back to a single word -- covers "Jessica Marie Love"-length full
+/// names without the prefix search (and worst-case contact-list scan)
+/// growing unbounded on a long message that happens to start with
+/// several short words.
+const MAX_NAME_WORDS: usize = 4;
+
+/// What `greedy_match_prefix` found, and at what prefix length --
+/// `resolve_name_and_message` uses the length to know where the
+/// message body starts; the network call needed to turn a `Contact`
+/// match into an actual `Destination` (`find_existing_direct_chat`)
+/// isn't done here, so this stays a pure, network-free function that
+/// unit tests can call directly against a fixture contact list.
+#[derive(Debug)]
+enum GreedyMatch<'a> {
+    Alias { len: usize, display_name: &'a str, guid: &'a str },
+    Contact { len: usize, contact: &'a ContactRecord },
+}
+
+/// Tries `words` as a contact name at every prefix length from longest
+/// (capped at `MAX_NAME_WORDS`) down to one word, checking
+/// `[bluebubbles.contacts]` aliases first (cheap, exact match) then
+/// real contacts, and returns the *first* (longest) length that
+/// resolves uniquely at either tier. This is the fix for a name/message
+/// split that can't be known from the words alone -- see
+/// `ParsedMessage`'s doc comment: "Jessica Love I'll be home soon"
+/// needs "Jessica Love" tried as a whole before "Jessica" alone, or the
+/// message ends up as "Love I'll be home soon" every time the contact's
+/// full name is what's needed to disambiguate her from someone else.
+/// A candidate that's ambiguous at some tier (multiple contacts match)
+/// isn't treated as a length match -- it just falls through to shorter
+/// prefixes like a plain non-match would, since a `find_best_contact_match`
+/// error at a longer, coincidentally-ambiguous prefix shouldn't block
+/// a perfectly good shorter match from being tried.
+fn greedy_match_prefix<'a>(
+    words: &[String],
+    contacts: &'a [ContactRecord],
+    aliases: &'a HashMap<String, String>,
+) -> Option<GreedyMatch<'a>> {
+    // At least one word must remain for the message itself.
+    let max_len = words.len().saturating_sub(1).min(MAX_NAME_WORDS);
+
+    for len in (1..=max_len).rev() {
+        let candidate = words[..len].join(" ");
+        if let Some((display_name, guid)) = resolve_manual_alias(&candidate, aliases) {
+            return Some(GreedyMatch::Alias { len, display_name, guid });
+        }
+    }
+    for len in (1..=max_len).rev() {
+        let candidate = words[..len].join(" ");
+        if let Ok(contact) = find_best_contact_match(&candidate, contacts) {
+            return Some(GreedyMatch::Contact { len, contact });
+        }
+    }
+    None
+}
+
+/// Resolves a [`ParsedMessage::NoConnector`] command: runs
+/// `greedy_match_prefix` (fetching real contacts once, up front, so
+/// every prefix length tried against them is a free in-memory check
+/// rather than a fresh network round-trip each time) and turns whatever
+/// it found into a `(Resolved, message)` pair, message being whatever
+/// words weren't consumed as the name. Falls back to the old
+/// single-word-name behavior -- including its exact error message --
+/// if nothing longer ever matches, so a genuinely single-word name
+/// ("mom", "sarah") behaves exactly as before.
+fn resolve_name_and_message(
+    words: &[String],
+    cfg: &BlueBubblesConfig,
+) -> Result<(Resolved, String), String> {
+    tracing::debug!(
+        "[router:bluebubbles] resolving name/message split against {}",
+        cfg.server_url
+    );
+    let contacts = fetch_contacts(cfg).inspect_err(|e| {
+        tracing::warn!("[router:bluebubbles] fetch_contacts failed: {e}");
+    })?;
+    tracing::debug!("[router:bluebubbles] fetched {} contacts", contacts.len());
+
+    match greedy_match_prefix(words, &contacts, &cfg.contacts) {
+        Some(GreedyMatch::Alias { len, display_name, guid }) => {
+            tracing::debug!(
+                "[router:bluebubbles] {:?} -> manual alias {display_name:?}",
+                words[..len].join(" ")
+            );
+            Ok((
+                Resolved {
+                    display_name: display_name.to_string(),
+                    destination: Destination::ExistingChat(guid.to_string()),
+                },
+                words[len..].join(" "),
+            ))
+        }
+        Some(GreedyMatch::Contact { len, contact }) => {
+            let existing = find_existing_direct_chat(&contact.addresses, cfg).inspect_err(|e| {
+                tracing::warn!("[router:bluebubbles] find_existing_direct_chat failed: {e}");
+            })?;
+            let destination = match existing {
+                Some(guid) => {
+                    tracing::debug!(
+                        "[router:bluebubbles] matched {:?} -> existing chat {guid}",
+                        contact.display_name
+                    );
+                    Destination::ExistingChat(guid)
+                }
+                None => {
+                    tracing::debug!(
+                        "[router:bluebubbles] matched {:?} -> no existing thread, will start a new one",
+                        contact.display_name
+                    );
+                    Destination::NewChat(contact.addresses[0].clone())
+                }
+            };
+            Ok((
+                Resolved {
+                    display_name: contact.display_name.clone(),
+                    destination,
+                },
+                words[len..].join(" "),
+            ))
+        }
+        None => {
+            // Nothing at any prefix length matched -- fall back to the
+            // single-word name for a familiar, specific error (no
+            // match / ambiguous) rather than a generic "couldn't find
+            // a name" for what's still a very common, real case (an
+            // actually-unknown or genuinely single-word name).
+            let name = &words[0];
+            let err = find_best_contact_match(name, &contacts)
+                .err()
+                .unwrap_or_else(|| format!("No contact named {name:?} found"));
+            tracing::debug!("[router:bluebubbles] no unique match at any prefix length: {err}");
+            Err(err)
+        }
+    }
+}
+
 /// Look up a spoken contact name in `[bluebubbles.contacts]`. Exact
 /// (case-insensitive) match only -- this is a manual override, not a
 /// fuzzy directory; see `find_best_contact_match` for the dynamic path.
@@ -548,15 +694,22 @@ pub fn prepare(arg: &str, cfg: &BlueBubblesConfig) -> Result<PreparedMessage, St
             "Couldn't tell who to message or what to say: {arg:?}"
         ));
     };
-    tracing::debug!(
-        "[router:bluebubbles] prepare: parsed name={:?} text_len={}",
-        parsed.name,
-        parsed.text.len()
-    );
-    let resolved = resolve(&parsed.name, cfg)?;
+    let (resolved, text) = match parsed {
+        ParsedMessage::Connector { name, text } => {
+            tracing::debug!(
+                "[router:bluebubbles] prepare: parsed name={name:?} text_len={}",
+                text.len()
+            );
+            (resolve(&name, cfg)?, text)
+        }
+        ParsedMessage::NoConnector { words } => {
+            tracing::debug!("[router:bluebubbles] prepare: no connector, words={words:?}");
+            resolve_name_and_message(&words, cfg)?
+        }
+    };
     Ok(PreparedMessage {
         label: recipient_label(&resolved),
-        body: parsed.text,
+        body: text,
     })
 }
 
@@ -576,7 +729,7 @@ pub fn run_confirmed(
     cfg: &BlueBubblesConfig,
 ) -> (bool, String) {
     tracing::debug!("[router:bluebubbles] run_confirmed: {arg:?} edited_body={edited_body:?}");
-    let Some(mut parsed) = parse_command(arg) else {
+    let Some(parsed) = parse_command(arg) else {
         tracing::warn!(
             "[router:bluebubbles] run_confirmed: couldn't parse a name/message out of {arg:?}"
         );
@@ -585,32 +738,50 @@ pub fn run_confirmed(
             format!("Couldn't tell who to message or what to say: {arg:?}"),
         );
     };
-    if let Some(body) = edited_body {
-        let trimmed = body.trim();
-        if trimmed.is_empty() {
+
+    // Checked before resolving anything (a network round-trip) -- an
+    // empty edit is rejected outright regardless of what the command
+    // would otherwise resolve to, so there's no reason to pay for a
+    // contact lookup first just to throw the result away.
+    let edited_trimmed = match edited_body {
+        Some(body) if body.trim().is_empty() => {
             tracing::warn!(
                 "[router:bluebubbles] run_confirmed: edited body is empty, refusing to send"
             );
             return (false, "Message is empty -- not sending".to_string());
         }
-        parsed.text = trimmed.to_string();
-    }
-    let resolved = match resolve(&parsed.name, cfg) {
-        Ok(r) => r,
-        Err(e) => {
-            tracing::warn!("[router:bluebubbles] run_confirmed: resolve failed: {e}");
-            return (false, e);
-        }
+        Some(body) => Some(body.trim().to_string()),
+        None => None,
     };
+
+    let (resolved, mut text) = match parsed {
+        ParsedMessage::Connector { name, text } => match resolve(&name, cfg) {
+            Ok(r) => (r, text),
+            Err(e) => {
+                tracing::warn!("[router:bluebubbles] run_confirmed: resolve failed: {e}");
+                return (false, e);
+            }
+        },
+        ParsedMessage::NoConnector { words } => match resolve_name_and_message(&words, cfg) {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!("[router:bluebubbles] run_confirmed: resolve failed: {e}");
+                return (false, e);
+            }
+        },
+    };
+    if let Some(t) = edited_trimmed {
+        text = t;
+    }
 
     let result = match &resolved.destination {
         Destination::ExistingChat(guid) => {
             tracing::debug!("[router:bluebubbles] sending into existing chat {guid}");
-            send(guid, &parsed.text, cfg)
+            send(guid, &text, cfg)
         }
         Destination::NewChat(address) => {
             tracing::debug!("[router:bluebubbles] starting a new chat with {address}");
-            create_and_send(address, &parsed.text, cfg)
+            create_and_send(address, &text, cfg)
         }
     };
     match result {
@@ -744,6 +915,19 @@ mod tests {
                 display_name: "Andrew Heath".to_string(),
                 addresses: vec!["+15037582384".to_string(), "andrew@example.com".to_string()],
             },
+            // A same-first-name pair, same shape as the live bug this
+            // regresses: "Jessica" alone is ambiguous between the two,
+            // so only the full "Jessica Love" disambiguates -- and the
+            // old single-word-name split sent "Love ..." as the
+            // message every time that full name was spoken.
+            ContactRecord {
+                display_name: "Jessica Love".to_string(),
+                addresses: vec!["+15553334444".to_string()],
+            },
+            ContactRecord {
+                display_name: "Jessica Smith".to_string(),
+                addresses: vec!["+15555556666".to_string()],
+            },
         ]
     }
 
@@ -789,11 +973,23 @@ mod tests {
         );
     }
 
+    /// Unwraps a `ParsedMessage::NoConnector`'s `words`, panicking with
+    /// a clear message if `parse_command` took the `Connector` branch
+    /// instead -- the no-connector tests below all expect the split to
+    /// be deferred, not resolved eagerly against a fixed first word.
+    fn no_connector_words(p: ParsedMessage) -> Vec<String> {
+        match p {
+            ParsedMessage::NoConnector { words } => words,
+            ParsedMessage::Connector { name, text } => {
+                panic!("expected NoConnector, got Connector {{ name: {name:?}, text: {text:?} }}")
+            }
+        }
+    }
+
     #[test]
     fn parses_plain_verb_prefix() {
-        let p = parse_command("text mom I'm running late").unwrap();
-        assert_eq!(p.name, "mom");
-        assert_eq!(p.text, "I'm running late");
+        let words = no_connector_words(parse_command("text mom I'm running late").unwrap());
+        assert_eq!(words, vec!["mom", "I'm", "running", "late"]);
     }
 
     #[test]
@@ -801,13 +997,11 @@ mod tests {
         // Observed live: voxtype transcribed "text Jessica is this
         // working?" as "Tax is this working." -- "tax" should still
         // strip as the verb, not get treated as the contact's name.
-        let p = parse_command("tax jessica is this working").unwrap();
-        assert_eq!(p.name, "jessica");
-        assert_eq!(p.text, "is this working");
+        let words = no_connector_words(parse_command("tax jessica is this working").unwrap());
+        assert_eq!(words, vec!["jessica", "is", "this", "working"]);
 
-        let p = parse_command("tex sarah I'm running late").unwrap();
-        assert_eq!(p.name, "sarah");
-        assert_eq!(p.text, "I'm running late");
+        let words = no_connector_words(parse_command("tex sarah I'm running late").unwrap());
+        assert_eq!(words, vec!["sarah", "I'm", "running", "late"]);
     }
 
     #[test]
@@ -815,9 +1009,8 @@ mod tests {
         // "mom running late" relies on the *no-verb* fallback (see
         // falls_back_to_first_word_as_name_with_no_connector) --
         // "mom" must not itself get eaten as a fuzzy-matched verb.
-        let p = parse_command("mom running late").unwrap();
-        assert_eq!(p.name, "mom");
-        assert_eq!(p.text, "running late");
+        let words = no_connector_words(parse_command("mom running late").unwrap());
+        assert_eq!(words, vec!["mom", "running", "late"]);
     }
 
     #[test]
@@ -834,34 +1027,49 @@ mod tests {
         assert!(!looks_like_message_command("what's my tax rate this year"));
     }
 
+    /// Unwraps a `ParsedMessage::Connector`'s `(name, text)`, panicking
+    /// with a clear message if `parse_command` deferred to
+    /// `NoConnector` instead.
+    fn connector_name_and_text(p: ParsedMessage) -> (String, String) {
+        match p {
+            ParsedMessage::Connector { name, text } => (name, text),
+            ParsedMessage::NoConnector { words } => {
+                panic!("expected Connector, got NoConnector {{ words: {words:?} }}")
+            }
+        }
+    }
+
     #[test]
     fn parses_saying_connector() {
-        let p = parse_command("text sarah saying I'll be there in 10").unwrap();
-        assert_eq!(p.name, "sarah");
-        assert_eq!(p.text, "I'll be there in 10");
+        let (name, text) =
+            connector_name_and_text(parse_command("text sarah saying I'll be there in 10").unwrap());
+        assert_eq!(name, "sarah");
+        assert_eq!(text, "I'll be there in 10");
     }
 
     #[test]
     fn parses_send_a_message_to_phrasing() {
-        let p = parse_command("send a message to mom saying dinner's ready").unwrap();
-        assert_eq!(p.name, "mom");
-        assert_eq!(p.text, "dinner's ready");
+        let (name, text) = connector_name_and_text(
+            parse_command("send a message to mom saying dinner's ready").unwrap(),
+        );
+        assert_eq!(name, "mom");
+        assert_eq!(text, "dinner's ready");
     }
 
     #[test]
     fn parses_tell_verb() {
-        let p = parse_command("tell sarah I'm on my way").unwrap();
-        assert_eq!(p.name, "sarah");
-        assert_eq!(p.text, "I'm on my way");
+        // No connector word present -- deferred, same as any other
+        // no-connector command.
+        let words = no_connector_words(parse_command("tell sarah I'm on my way").unwrap());
+        assert_eq!(words, vec!["sarah", "I'm", "on", "my", "way"]);
     }
 
     #[test]
     fn falls_back_to_first_word_as_name_with_no_connector() {
         // Classifier's argument extraction may have already stripped
         // the leading verb.
-        let p = parse_command("mom running late").unwrap();
-        assert_eq!(p.name, "mom");
-        assert_eq!(p.text, "running late");
+        let words = no_connector_words(parse_command("mom running late").unwrap());
+        assert_eq!(words, vec!["mom", "running", "late"]);
     }
 
     #[test]
@@ -912,6 +1120,88 @@ mod tests {
         let contacts = contact_records();
         let err = find_best_contact_match("grandpa", &contacts).unwrap_err();
         assert!(err.contains("grandpa"));
+    }
+
+    /// Regression test for the live bug: "text Jessica Love I'll be
+    /// home soon" sent "Love I'll be home soon" as the message every
+    /// time, because a single-word-only name split can't know "Jessica
+    /// Love" is one contact rather than "Jessica" the name and "Love"
+    /// the first word of the message. `contact_records()` makes plain
+    /// "Jessica" genuinely ambiguous (two Jessicas), matching what was
+    /// observed live -- only the full name resolves.
+    #[test]
+    fn greedy_match_prefix_prefers_the_longest_matching_contact_name() {
+        let contacts = contact_records();
+        let aliases = HashMap::new();
+        let words: Vec<String> = "Jessica Love I'll be home soon"
+            .split_whitespace()
+            .map(String::from)
+            .collect();
+
+        match greedy_match_prefix(&words, &contacts, &aliases) {
+            Some(GreedyMatch::Contact { len, contact }) => {
+                assert_eq!(len, 2, "should consume both name words, not just \"Jessica\"");
+                assert_eq!(contact.display_name, "Jessica Love");
+                assert_eq!(words[len..].join(" "), "I'll be home soon");
+            }
+            other => panic!("expected a 2-word Contact match, got {other:?}"),
+        }
+    }
+
+    /// A single-word name ("mom", "sarah") -- the common case -- still
+    /// works exactly as before: no longer prefix ever matches anything,
+    /// so the search falls all the way down to one word.
+    #[test]
+    fn greedy_match_prefix_falls_back_to_a_single_word_name() {
+        let contacts = contact_records();
+        let aliases = HashMap::new();
+        let words: Vec<String> = "sarah jones is running late"
+            .split_whitespace()
+            .map(String::from)
+            .collect();
+
+        // "sarah jones" (2 words) *is* a real contact here, so this
+        // should actually match at len=2 -- see the next test for the
+        // genuinely-no-longer-match case.
+        match greedy_match_prefix(&words, &contacts, &aliases) {
+            Some(GreedyMatch::Contact { len, contact }) => {
+                assert_eq!(len, 2);
+                assert_eq!(contact.display_name, "Sarah Jones");
+            }
+            other => panic!("expected a 2-word Contact match, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn greedy_match_prefix_falls_back_to_alias_when_no_longer_prefix_matches() {
+        let contacts = contact_records();
+        let aliases = manual_contacts(); // just "mom"
+        let words: Vec<String> = "mom running late"
+            .split_whitespace()
+            .map(String::from)
+            .collect();
+
+        // "mom running" (2 words) matches nothing -- falls back to the
+        // single-word alias.
+        match greedy_match_prefix(&words, &contacts, &aliases) {
+            Some(GreedyMatch::Alias { len, display_name, .. }) => {
+                assert_eq!(len, 1);
+                assert_eq!(display_name, "mom");
+            }
+            other => panic!("expected a 1-word Alias match, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn greedy_match_prefix_none_when_nothing_matches_at_any_length() {
+        let contacts = contact_records();
+        let aliases = HashMap::new();
+        let words: Vec<String> = "grandpa is running late"
+            .split_whitespace()
+            .map(String::from)
+            .collect();
+
+        assert!(greedy_match_prefix(&words, &contacts, &aliases).is_none());
     }
 
     #[test]

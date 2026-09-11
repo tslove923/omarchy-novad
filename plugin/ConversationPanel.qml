@@ -115,6 +115,28 @@ PanelWindow {
     readonly property bool listenButtonVisible: active && phase === ""
     readonly property bool stopListeningButtonVisible: phase === "listening"
 
+    // ── Session picker -- see src/sessions.rs's doc comment. Every new
+    //    conversation gets its own fresh OpenClaw session by default;
+    //    this dropdown is the opt-in "actually, revisit an old one"
+    //    escape hatch. ──
+    readonly property var sessionList: root.service ? root.service.sessionList : []
+    readonly property string currentSessionKey: root.service ? root.service.conversationSessionKey : ""
+    property bool sessionMenuOpen: false
+
+    function sessionRowLabel(rec) {
+        return (rec.label && rec.label.length > 0) ? rec.label : "New session";
+    }
+
+    function switchToSession(key) {
+        root.sessionMenuOpen = false;
+        if (root.service) root.service.switchToSession(key);
+    }
+
+    function startNewSession() {
+        root.sessionMenuOpen = false;
+        if (root.service) root.service.startNewSession();
+    }
+
     function stopConversation() {
         if (root.service) root.service.stopConversation();
     }
@@ -178,6 +200,18 @@ PanelWindow {
                 anchors.right: parent.right
                 anchors.verticalCenter: parent.verticalCenter
                 spacing: 8
+
+                // Sessions: opens the picker dropdown below (see the
+                // Rectangle declared after turnsList) -- "usually a new
+                // session" is the default (starting a conversation
+                // never needs this), this is only for revisiting one.
+                PopupButton {
+                    anchors.verticalCenter: parent.verticalCenter
+                    label: "Sessions"
+                    tint: OmarchyTheme.accent
+                    primary: root.sessionMenuOpen
+                    onClicked: root.sessionMenuOpen = !root.sessionMenuOpen
+                }
 
                 // Record: only shown once idle (phase === ""), waiting
                 // for the user to start the next turn -- the daemon
@@ -411,6 +445,126 @@ PanelWindow {
             color: root.mutedColor
             font.pixelSize: 13
             visible: turnsList.count === 0 && root.pendingUserText.length === 0
+        }
+
+        // ── Session picker dropdown -- declared last (after
+        //    turnsList/bottomBar above) so it draws on top of them; a
+        //    click anywhere outside it closes it. ──
+        MouseArea {
+            anchors.fill: parent
+            visible: root.sessionMenuOpen
+            enabled: root.sessionMenuOpen
+            onClicked: root.sessionMenuOpen = false
+        }
+
+        Rectangle {
+            id: sessionMenu
+            visible: root.sessionMenuOpen
+            anchors.top: header.bottom
+            anchors.right: parent.right
+            anchors.topMargin: 4
+            anchors.rightMargin: 16
+            width: 220
+            height: Math.min(sessionMenuColumn.implicitHeight + 12, 320)
+            radius: 8
+            color: Qt.darker(root.bgColor, 1.2)
+            border.width: 1
+            border.color: root.divider
+            clip: true
+
+            Flickable {
+                anchors.fill: parent
+                anchors.margins: 6
+                contentWidth: width
+                contentHeight: sessionMenuColumn.implicitHeight
+                clip: true
+                boundsBehavior: Flickable.StopAtBounds
+
+                Column {
+                    id: sessionMenuColumn
+                    width: parent.width
+                    spacing: 2
+
+                    Rectangle {
+                        width: parent.width
+                        height: 28
+                        radius: 6
+                        color: newSessionArea.containsMouse ? Qt.rgba(root.accent.r, root.accent.g, root.accent.b, 0.18) : "transparent"
+
+                        Text {
+                            anchors.left: parent.left
+                            anchors.leftMargin: 8
+                            anchors.verticalCenter: parent.verticalCenter
+                            text: "+ New Session"
+                            color: root.accent
+                            font.pixelSize: 12
+                            font.weight: Font.Medium
+                        }
+
+                        MouseArea {
+                            id: newSessionArea
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: root.startNewSession()
+                        }
+                    }
+
+                    Rectangle {
+                        width: parent.width
+                        height: 1
+                        color: root.divider
+                        visible: root.sessionList.length > 0
+                    }
+
+                    Text {
+                        width: parent.width
+                        text: "No past sessions yet"
+                        color: root.mutedColor
+                        font.pixelSize: 11
+                        visible: root.sessionList.length === 0
+                        topPadding: 6
+                        bottomPadding: 4
+                        horizontalAlignment: Text.AlignHCenter
+                    }
+
+                    Repeater {
+                        model: root.sessionList
+
+                        delegate: Rectangle {
+                            required property var modelData
+                            readonly property bool isCurrent: modelData.key === root.currentSessionKey
+
+                            width: sessionMenuColumn.width
+                            height: 28
+                            radius: 6
+                            color: rowArea.containsMouse
+                                ? Qt.rgba(root.accent.r, root.accent.g, root.accent.b, 0.14)
+                                : (isCurrent ? Qt.rgba(root.accent.r, root.accent.g, root.accent.b, 0.08) : "transparent")
+
+                            Text {
+                                anchors.left: parent.left
+                                anchors.right: parent.right
+                                anchors.leftMargin: 8
+                                anchors.rightMargin: 8
+                                anchors.verticalCenter: parent.verticalCenter
+                                text: (isCurrent ? "● " : "") + root.sessionRowLabel(modelData)
+                                color: isCurrent ? root.textColor : root.mutedColor
+                                font.pixelSize: 12
+                                elide: Text.ElideRight
+                            }
+
+                            MouseArea {
+                                id: rowArea
+                                anchors.fill: parent
+                                hoverEnabled: true
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: root.switchToSession(modelData.key)
+                            }
+                        }
+                    }
+                }
+            }
         }
 
         // ── The in-progress turn -- shown as a footer below the

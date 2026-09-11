@@ -68,6 +68,11 @@ QtObject {
     // plain read-only text -- true only during "confirming" for a
     // Message (see src/popup/mod.rs's PopupState::editable).
     property bool popupEditable: false
+    // Mirrors config::PopupConfig -- whether "confirming" should run
+    // the auto-approve countdown (slider fill + timed "approve"), and
+    // how long it takes. See PopupCard.qml's confirm box.
+    property bool popupAutoApprove: true
+    property real popupAutoApproveTimeoutSecs: 3.0
 
     readonly property bool popupHasContent: popupPhase !== "idle"
 
@@ -83,6 +88,9 @@ QtObject {
                 root.popupText = parsed.text || "";
                 root.popupConfirmLabel = parsed.confirm_label || "";
                 root.popupEditable = parsed.editable || false;
+                root.popupAutoApprove = parsed.auto_approve !== undefined ? parsed.auto_approve : true;
+                root.popupAutoApproveTimeoutSecs = parsed.auto_approve_timeout_secs !== undefined
+                    ? parsed.auto_approve_timeout_secs : 3.0;
             } catch (e) {
                 // Daemon writes the file non-atomically; a torn read
                 // during a write is possible and not worth logging.
@@ -94,6 +102,8 @@ QtObject {
             root.popupText = "";
             root.popupConfirmLabel = "";
             root.popupEditable = false;
+            root.popupAutoApprove = true;
+            root.popupAutoApproveTimeoutSecs = 3.0;
         }
 
         onFileChanged: reload()
@@ -144,6 +154,11 @@ QtObject {
     // appears as the model produces it, not all at once when the turn
     // finishes.
     property string conversationStreamingText: ""
+    // The bare crate::sessions key this loop is using -- see
+    // src/conversation/mod.rs's ConversationState::session_key. "" when
+    // no loop has ever run this login session. Lets the session
+    // picker (below) highlight which entry is the live one.
+    property string conversationSessionKey: ""
 
     // Previous-turn state for the auto-show transition detection in
     // _conversationStateView.onLoaded -- the panel pops open on a
@@ -171,19 +186,33 @@ QtObject {
                 root.conversationThinkingElapsedSecs = (parsed.thinking_elapsed_secs !== undefined
                     && parsed.thinking_elapsed_secs !== null) ? parsed.thinking_elapsed_secs : -1;
                 root.conversationStreamingText = parsed.streaming_text || "";
-                // Auto-show on a novad activation: a conversation starting
-                // or a turn entering "thinking" (the point a transcript --
-                // or typed message -- has just been sent, once per turn).
-                // Transition-based (not level-based) so an explicit
-                // tray/key-bind hide sticks until the *next* activation --
-                // a running conversation alone doesn't keep re-popping the
-                // panel.
+                root.conversationSessionKey = parsed.session_key || "";
+                // Auto-show on a novad activation. Transition-based (not
+                // level-based) so an explicit tray/key-bind hide sticks
+                // until the *next* activation -- a running conversation
+                // alone doesn't keep re-popping the panel. Found live: a
+                // long OpenClaw turn is worth dismissing (panel +
+                // VoiceVisualizer.qml's ambient node both key off
+                // panelVisible) and getting back to whatever else you were
+                // doing, as long as it reliably comes back once there's
+                // something to look at -- so this fires on every point
+                // that's true, not just "a turn was just sent":
+                //   - a conversation starting
+                //   - a turn entering "thinking" (transcript/message sent)
+                //   - a turn entering "speaking" (the reply is ready)
+                //   - back to idle mid-conversation after thinking/speaking
+                //     (nothing left to show -- the loop is now waiting on
+                //     you to trigger the next turn)
                 const wasActive = root._prevConversationActive;
                 const wasPhase = root._prevConversationPhase;
                 root._prevConversationActive = root.conversationActive;
                 root._prevConversationPhase = root.conversationPhase;
+                const enteredThinking = root.conversationPhase === "thinking" && wasPhase !== "thinking";
+                const enteredSpeaking = root.conversationPhase === "speaking" && wasPhase !== "speaking";
+                const backToIdleAwaitingInput = root.conversationActive && root.conversationPhase === ""
+                    && (wasPhase === "thinking" || wasPhase === "speaking");
                 if ((root.conversationActive && !wasActive)
-                    || (root.conversationPhase === "thinking" && wasPhase !== "thinking")) {
+                    || enteredThinking || enteredSpeaking || backToIdleAwaitingInput) {
                     root.panelVisible = true;
                 }
             } catch (e) {
@@ -200,11 +229,103 @@ QtObject {
             root.conversationTurns = [];
             root.conversationThinkingElapsedSecs = -1;
             root.conversationStreamingText = "";
+            root.conversationSessionKey = "";
             root._prevConversationActive = false;
             root._prevConversationPhase = "";
         }
 
         onFileChanged: reload()
+    }
+
+    // ─────────────────────── session picker (OpenClaw) ───────────────────────
+    // Recent OpenClaw sessions this daemon has created -- see
+    // src/sessions.rs's doc comment for why *something* has to track
+    // these locally (the gateway has no "list sessions" of its own).
+    // Recency-ordered, most recently active first, same order the JSON
+    // file itself is already written in.
+
+    // Array of { key, label, created_at_ms, last_active_ms }.
+    property var sessionList: []
+
+    property FileView _sessionsView: FileView {
+        path: root.runtimeDir + "/omarchy-novad/sessions.json"
+        watchChanges: true
+        printErrors: false
+
+        onLoaded: {
+            try {
+                root.sessionList = JSON.parse(text()) || [];
+            } catch (e) {
+                // Same non-atomic-write caveat as the other state files.
+            }
+        }
+
+        onLoadFailed: {
+            // No conversation has ever started this login session.
+            root.sessionList = [];
+        }
+
+        onFileChanged: reload()
+    }
+
+    // Stops the running loop (if any) and starts a fresh one pointed at
+    // `key` -- the session picker's "resume this one" action. A
+    // `converse stop` only asks the loop to end after its current turn
+    // (see conversation::stop's doc comment), so this can't just fire
+    // both commands back to back: `_sessionSwitchPoll` below waits for
+    // `conversationActive` to actually drop before starting the new
+    // loop, same "poll until it's really true" shape
+    // `autoApproveTicker` (PopupCard.qml) uses for its own timed state.
+    // Picking the *current* session, or picking one while nothing is
+    // running, just starts it immediately -- no stop to wait for.
+    function switchToSession(key) {
+        if (root.conversationActive && root.conversationSessionKey !== key) {
+            root._pendingSessionSwitch = key;
+            root.stopConversation();
+            _sessionSwitchPoll.running = true;
+        } else {
+            root._startConversationWithSession(key);
+        }
+    }
+
+    property string _pendingSessionSwitch: ""
+
+    property Timer _sessionSwitchPoll: Timer {
+        interval: 150
+        repeat: true
+        onTriggered: {
+            if (!root.conversationActive) {
+                _sessionSwitchPoll.running = false;
+                const key = root._pendingSessionSwitch;
+                root._pendingSessionSwitch = "";
+                if (key === "") {
+                    root.startConversation(); // "mint fresh" -- see startNewSession
+                } else {
+                    root._startConversationWithSession(key);
+                }
+            }
+        }
+    }
+
+    function _startConversationWithSession(key) {
+        _converseStartProcess.command = [root.novadBinary, "converse", "start", "--session", key];
+        _converseStartProcess.running = true;
+    }
+
+    // The picker's "New Session" entry -- same stop-then-start shape as
+    // switchToSession, just with no --session flag so the daemon mints
+    // a fresh one (see sessions::new_session). Distinct from
+    // startConversation() below: that one's for BarWidget's "start the
+    // loop" toggle when nothing is running yet and never needs to stop
+    // an existing one first.
+    function startNewSession() {
+        if (root.conversationActive) {
+            root._pendingSessionSwitch = ""; // "" means "mint fresh" to the poll handler below
+            root.stopConversation();
+            _sessionSwitchPoll.running = true;
+        } else {
+            root.startConversation();
+        }
     }
 
     // Starts the OpenClaw voice-conversation loop -- see

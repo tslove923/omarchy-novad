@@ -61,6 +61,43 @@ PanelWindow {
     // should be showing right now, instead of the plain read-only text.
     readonly property bool editBoxVisible: phase === "confirming" && editable
 
+    readonly property bool autoApprove: root.service ? root.service.popupAutoApprove : true
+    readonly property real autoApproveTimeoutSecs: root.service ? root.service.popupAutoApproveTimeoutSecs : 3.0
+
+    // ── Auto-approve countdown -- see popup::PopupConfig on the daemon
+    //    side. Drives the fill overlay on the Approve button (below)
+    //    and, on completion, sends the same "approve" action a manual
+    //    click would -- whatever's currently in the edit box (if any)
+    //    at that moment goes out, same as a manual Approve. `!dismissed`
+    //    guards against the × button: it already stops the timer
+    //    explicitly (see its onClicked), this is defense-in-depth so a
+    //    hidden popup can never fire a stray approve behind the user's
+    //    back. Manual ticking (not NumberAnimation/Timer.interval tied
+    //    to the full duration) so restart-on-new-confirmation is exact
+    //    and explicit rather than relying on animation restart
+    //    semantics. ──
+    readonly property bool autoApproveActive: phase === "confirming" && autoApprove && !root.dismissed
+    property real autoApproveElapsedMs: 0
+    readonly property real autoApproveProgress: autoApproveActive
+        ? Math.min(1.0, autoApproveElapsedMs / (autoApproveTimeoutSecs * 1000))
+        : 0
+
+    onAutoApproveActiveChanged: if (autoApproveActive) root.autoApproveElapsedMs = 0
+
+    Timer {
+        id: autoApproveTicker
+        interval: 16
+        repeat: true
+        running: root.autoApproveActive
+        onTriggered: {
+            root.autoApproveElapsedMs += interval;
+            if (root.autoApproveElapsedMs >= root.autoApproveTimeoutSecs * 1000) {
+                stop();
+                root.respond("approve", root.editBoxVisible ? editField.text : undefined);
+            }
+        }
+    }
+
     anchors { top: true; bottom: true; left: true; right: true }
     color: "transparent"
     exclusionMode: ExclusionMode.Ignore
@@ -311,15 +348,38 @@ PanelWindow {
                 PopupButton {
                     label: "Deny"
                     tint: root.danger
-                    onClicked: root.respond("deny")
+                    onClicked: {
+                        autoApproveTicker.stop();
+                        root.respond("deny");
+                    }
                 }
                 PopupButton {
                     label: "Approve"
                     tint: root.approve
                     primary: true
-                    onClicked: root.editBoxVisible
-                        ? root.respond("approve", editField.text)
-                        : root.respond("approve")
+                    onClicked: {
+                        autoApproveTicker.stop();
+                        root.editBoxVisible
+                            ? root.respond("approve", editField.text)
+                            : root.respond("approve");
+                    }
+
+                    // ── Auto-approve fill -- grows left-to-right as
+                    //    root.autoApproveProgress advances, reaching
+                    //    the button's full width exactly when the
+                    //    countdown fires. A plain Rectangle (no
+                    //    MouseArea) sitting on top of the button's own
+                    //    background doesn't intercept clicks -- see
+                    //    PopupButton.qml's own MouseArea underneath. ──
+                    Rectangle {
+                        anchors.left: parent.left
+                        anchors.top: parent.top
+                        anchors.bottom: parent.bottom
+                        width: parent.width * root.autoApproveProgress
+                        radius: parent.radius
+                        color: Qt.rgba(root.approve.r, root.approve.g, root.approve.b, 0.35)
+                        visible: root.autoApproveActive
+                    }
                 }
             }
 
@@ -367,6 +427,7 @@ PanelWindow {
             implicitWidth: 22
             implicitHeight: 22
             onClicked: {
+                autoApproveTicker.stop();
                 root.respond("deny");
                 root.dismissed = true;
             }

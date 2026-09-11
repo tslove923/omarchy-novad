@@ -30,7 +30,7 @@ use std::sync::mpsc;
 
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ConversationPhase {
     Listening,
@@ -38,7 +38,7 @@ pub enum ConversationPhase {
     Speaking,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConversationTurn {
     pub user_text: String,
     /// OpenClaw's full, unabridged reply -- shown verbatim in the
@@ -48,14 +48,23 @@ pub struct ConversationTurn {
     /// `converse::spoken_text_for`) -- `None` when `full_response` was
     /// already short enough to speak verbatim, or when condensing a
     /// long one failed and it was spoken verbatim as a fallback.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spoken_summary: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ConversationState {
     pub active: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// The bare `crate::sessions` key this loop is using (see
+    /// `router::openclaw::gateway_session_key`) -- empty only for a
+    /// still-`Default` state before `converse::run` has written its
+    /// first real one. Lets the panel show which session is live and
+    /// the session picker highlight it; `#[serde(default)]` covers a
+    /// state file written by a daemon binary from before this field
+    /// existed.
+    #[serde(default)]
+    pub session_key: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub phase: Option<ConversationPhase>,
     /// The current turn's utterance, already sent to OpenClaw -- set
     /// the instant a transcript (or typed message) is handed off, so
@@ -66,7 +75,7 @@ pub struct ConversationState {
     /// review/confirm step any more -- see `crate::converse::run`'s
     /// doc comment -- this field is purely informational display
     /// state, not a gate.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_user_text: Option<String>,
     pub turns: Vec<ConversationTurn>,
     /// Seconds elapsed on the current OpenClaw handoff -- only
@@ -75,7 +84,7 @@ pub struct ConversationState {
     /// for minutes), so this is the only feedback the panel has that
     /// it's still alive rather than hung -- see
     /// `converse::run_handoff_with_progress`.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thinking_elapsed_secs: Option<u64>,
     /// The live, incrementally-streamed text of the current OpenClaw
     /// reply -- only meaningful while `phase == Some(Thinking)`. The
@@ -86,7 +95,7 @@ pub struct ConversationState {
     /// handoff returns; the full reply then lands in a new `turns`
     /// entry. See `converse::run_handoff_with_progress` and
     /// `router::openclaw::handoff_streaming`.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub streaming_text: Option<String>,
 }
 
@@ -137,6 +146,17 @@ pub fn write_state(state: &ConversationState) {
         }
         Err(e) => tracing::warn!("failed to serialize conversation state: {e}"),
     }
+}
+
+/// Reads back whatever `write_state` last wrote -- `None` if no loop
+/// has ever run this login session, or the file's momentarily mid-write
+/// (see `write_state`'s rename-based approach; a `None` here is rare
+/// and never a hang, just "nothing to report"). Used by
+/// `main.rs::run_openclaw_continue_in_herdr` to find the presently
+/// active session's key without duplicating the daemon's own state.
+pub fn read_state() -> Option<ConversationState> {
+    let content = std::fs::read_to_string(state_path()).ok()?;
+    serde_json::from_str(&content).ok()
 }
 
 /// Actions the conversation window (or `omarchy-novad converse
@@ -329,6 +349,7 @@ mod tests {
     fn state_serializes_streaming_text_when_present() {
         let state = ConversationState {
             active: true,
+            session_key: "voice-1".to_string(),
             phase: Some(ConversationPhase::Thinking),
             pending_user_text: None,
             turns: Vec::new(),
@@ -344,6 +365,7 @@ mod tests {
     fn state_omits_streaming_text_when_absent() {
         let state = ConversationState {
             active: true,
+            session_key: "voice-1".to_string(),
             phase: None,
             pending_user_text: None,
             turns: Vec::new(),
@@ -359,6 +381,7 @@ mod tests {
     fn state_round_trips_turns_with_spoken_summary() {
         let state = ConversationState {
             active: true,
+            session_key: "voice-1".to_string(),
             phase: Some(ConversationPhase::Speaking),
             pending_user_text: None,
             turns: vec![ConversationTurn {

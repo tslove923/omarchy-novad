@@ -284,6 +284,13 @@ Concretely:
 
 ### Audio cues
 
+**Update, post-implementation:** found live to be distracting/"super
+annoying," so `[chime].enabled` (`config::ChimeConfig`) defaults to
+`false` -- off unless turned on, unlike most of this doc's other
+opt-out-by-default toggles. The three cues below are otherwise
+unchanged; `converse::maybe_chime` is the one place that checks the
+setting before calling `chime::play`.
+
 Three short, distinct chimes (a few hundred ms each, synthesized once
 and cached as static WAV assets rather than round-tripping through
 Kokoro every time):

@@ -7,6 +7,7 @@ mod pipeline;
 mod popup;
 mod router;
 mod serve;
+mod sessions;
 mod tts;
 mod wake;
 
@@ -221,6 +222,12 @@ enum ConverseCommand {
         /// trigger that already captured an utterance.
         #[arg(long)]
         text: Option<String>,
+        /// Resume an existing OpenClaw session by its `crate::sessions`
+        /// key (as shown by the panel's session picker) instead of
+        /// starting a fresh one -- the common case is no `--session` at
+        /// all, which mints a brand new one (see `sessions::new_session`).
+        #[arg(long)]
+        session: Option<String>,
         #[arg(long, default_value = "http://127.0.0.1:8420")]
         classify_base_url: String,
         #[arg(long, default_value = "qwen3-1.7b-instruct")]
@@ -321,6 +328,8 @@ fn main() -> anyhow::Result<()> {
                 file_config.telegram,
                 file_config.omapilot,
                 file_config.tts,
+                file_config.popup,
+                file_config.chime,
             )
         }
         Command::Serve {
@@ -377,16 +386,19 @@ fn main() -> anyhow::Result<()> {
             what:
                 ConverseCommand::Start {
                     text,
+                    session,
                     classify_base_url,
                     classify_model_id,
                     idle_timeout_secs,
                 },
         } => run_converse_start(
             text,
+            session,
             classify_base_url,
             classify_model_id,
             idle_timeout_secs,
             file_config.tts,
+            file_config.chime,
         ),
         Command::Converse {
             what: ConverseCommand::Stop,
@@ -456,7 +468,22 @@ fn run_telegram_send(
 /// optional bootstrap aid (see `config::OpenClawConfig`'s doc comment),
 /// not a credential this action can't function without.
 fn run_openclaw_continue_in_herdr(openclaw: Option<config::OpenClawConfig>) -> anyhow::Result<()> {
-    let (ok, message) = router::openclaw_continue_in_herdr(openclaw.as_ref());
+    // Prefer the session a `converse start` loop is actively using
+    // right now; fall back to whichever session was most recently
+    // active if none is running (still the most useful "continue this"
+    // target -- e.g. the panel was dismissed/idle-timed-out since the
+    // last turn, but the conversation is the one you want back).
+    let session_key = conversation::read_state()
+        .filter(|s| s.active)
+        .map(|s| s.session_key)
+        .filter(|k| !k.is_empty())
+        .or_else(|| sessions::list().into_iter().next().map(|r| r.key));
+    let Some(session_key) = session_key else {
+        anyhow::bail!(
+            "No OpenClaw session yet -- start a conversation first (wake word, or the panel's chat box)"
+        );
+    };
+    let (ok, message) = router::openclaw_continue_in_herdr(openclaw.as_ref(), &session_key);
     println!("{message}");
     if ok {
         Ok(())
@@ -467,20 +494,31 @@ fn run_openclaw_continue_in_herdr(openclaw: Option<config::OpenClawConfig>) -> a
 
 fn run_converse_start(
     text: Option<String>,
+    session: Option<String>,
     classify_base_url: String,
     classify_model_id: String,
     idle_timeout_secs: u64,
     tts: config::TtsConfig,
+    chime: config::ChimeConfig,
 ) -> anyhow::Result<()> {
-    println!("[omarchy-novad] Starting OpenClaw conversation. Ctrl+C, or 'omarchy-novad converse stop' from another terminal, to end it.");
+    // No `--session` given: mint a fresh one -- the common case (see
+    // `sessions::new_session`'s doc comment). Given one: resume it,
+    // whatever `converse::run`'s first `sessions::touch` call finds
+    // waiting there (a real prior conversation, or nothing yet if the
+    // key was hand-typed).
+    let session_key = session.unwrap_or_else(sessions::new_session);
+    println!("[omarchy-novad] Starting OpenClaw conversation (session {session_key}). Ctrl+C, or 'omarchy-novad converse stop' from another terminal, to end it.");
     let cfg = converse::ConverseConfig {
+        session_key,
         voxtype_binary: "voxtype".to_string(),
         transcript_path: transcript_path(),
         voxtype_state_path: voxtype_state_path(),
+        voxtype_partial_path: voxtype_partial_transcript_path(),
         classify_base_url,
         classify_model_id,
         tts,
         idle_timeout: std::time::Duration::from_secs(idle_timeout_secs),
+        chimes_enabled: chime.enabled,
     };
     converse::run(&cfg, text)
 }
@@ -578,6 +616,7 @@ fn run_popup_demo() -> anyhow::Result<()> {
                 text: text.to_string(),
                 confirm_label: confirm_label.map(String::from),
                 editable,
+                ..PopupState::default()
             });
 
             if phase == PopupPhase::Confirming {
@@ -597,6 +636,7 @@ fn run_popup_demo() -> anyhow::Result<()> {
                             text: String::new(),
                             confirm_label: None,
                             editable: false,
+                            ..PopupState::default()
                         });
                         std::thread::sleep(Duration::from_secs(2));
                         continue;
@@ -676,6 +716,8 @@ fn run_detect(
     telegram: Option<config::TelegramConfig>,
     omapilot: Option<config::OmaPilotConfig>,
     tts: config::TtsConfig,
+    popup: config::PopupConfig,
+    chime: config::ChimeConfig,
 ) -> anyhow::Result<()> {
     let trigger = resolve_trigger(on_detect);
     let detector = Detector::new(wakeword, device, &cache_dir(), threshold, patience)?;
@@ -717,11 +759,14 @@ fn run_detect(
         voxtype_binary: "voxtype".to_string(),
         transcript_path: transcript_path(),
         voxtype_state_path: voxtype_state_path(),
+        voxtype_partial_path: voxtype_partial_transcript_path(),
         home_assistant,
         bluebubbles,
         telegram,
         omapilot,
         tts,
+        popup,
+        chime,
     };
 
     let chunk_samples = listener.chunk_samples();
@@ -794,4 +839,18 @@ fn voxtype_state_path() -> std::path::PathBuf {
         .unwrap_or_else(std::env::temp_dir)
         .join("voxtype")
         .join("state")
+}
+
+/// voxtype's live, in-progress transcript for the `--file`-output
+/// session this project always starts (finalized text so far + the
+/// current unfinalized partial tail, rewritten on every partial/final/
+/// replace event) -- see voxtype's `daemon.rs::partial_text_path`. Same
+/// directory as `voxtype_state_path` by construction, not by accident:
+/// both are voxtype's own `Config::runtime_dir()`.
+fn voxtype_partial_transcript_path() -> std::path::PathBuf {
+    std::env::var_os("XDG_RUNTIME_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir)
+        .join("voxtype")
+        .join("partial_transcript")
 }

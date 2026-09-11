@@ -42,6 +42,9 @@ pub struct PipelineConfig {
     pub voxtype_binary: String,
     pub transcript_path: PathBuf,
     pub voxtype_state_path: PathBuf,
+    /// voxtype's live in-progress transcript for this session -- see
+    /// `listen_and_transcribe`'s `on_partial` doc comment.
+    pub voxtype_partial_path: PathBuf,
     /// `None` when `[home_assistant]` isn't configured (see
     /// config.rs) -- `Intent::HomeAssistant` falls back to
     /// `RouteResult::Unhandled` in that case, same as before this
@@ -97,6 +100,21 @@ pub fn run_session(cfg: &PipelineConfig) {
         &cfg.voxtype_binary,
         &cfg.transcript_path,
         &cfg.voxtype_state_path,
+        &cfg.voxtype_partial_path,
+        // Mirror voxtype's live transcript into the popup as it's
+        // heard, same phase (Recording) it's already showing -- see
+        // this module's doc comment on why Transcribing is never
+        // separately shown (there's no distinct phase left to poll,
+        // voxtype's streaming session covers both at once).
+        |partial| {
+            popup::write_state(&PopupState {
+                phase: PopupPhase::Recording,
+                text: partial.to_string(),
+                confirm_label: None,
+                editable: false,
+                ..PopupState::default()
+            });
+        },
     ) {
         Ok(t) => t,
         Err(e) => {
@@ -319,9 +337,16 @@ pub fn run_session(cfg: &PipelineConfig) {
         tracing::info!("[pipeline] external/coding request -- entering the conversation loop");
         popup::write_state(&PopupState::default());
         let converse_cfg = crate::converse::ConverseConfig {
+            // Every wake-word activation starts its own fresh OpenClaw
+            // session by default -- see `crate::sessions`'s doc comment
+            // and the panel's session picker for how an old one gets
+            // revisited instead (a manual `converse start --session`,
+            // not this automatic path).
+            session_key: crate::sessions::new_session(),
             voxtype_binary: cfg.voxtype_binary.clone(),
             transcript_path: cfg.transcript_path.clone(),
             voxtype_state_path: cfg.voxtype_state_path.clone(),
+            voxtype_partial_path: cfg.voxtype_partial_path.clone(),
             classify_base_url: cfg.classify_base_url.clone(),
             classify_model_id: cfg.classify_model_id.clone(),
             tts: cfg.tts.clone(),
@@ -411,10 +436,19 @@ pub fn run_session(cfg: &PipelineConfig) {
 /// `run_session` so a caller that needs more than one turn (see
 /// `crate::converse`'s multi-turn loop) can call this again for each
 /// follow-up reply without going through classify/route at all.
+///
+/// `on_partial` is called with voxtype's live in-progress transcript
+/// (`voxtype_partial_path` -- see that file's own doc comment in
+/// voxtype's `daemon.rs`) each time it changes while recording is
+/// underway, so a caller can mirror it into its own UI state as it's
+/// heard rather than only once the whole turn finishes. A no-op
+/// closure is fine for a caller that doesn't want live updates.
 pub fn listen_and_transcribe(
     voxtype_binary: &str,
     transcript_path: &std::path::Path,
     voxtype_state_path: &std::path::Path,
+    voxtype_partial_path: &std::path::Path,
+    on_partial: impl Fn(&str),
 ) -> anyhow::Result<String> {
     start_recording(voxtype_binary, transcript_path)
         .map_err(|e| anyhow::anyhow!("failed to start recording: {e}"))?;
@@ -422,7 +456,7 @@ pub fn listen_and_transcribe(
     if !wait_for_recording_to_start(voxtype_state_path) {
         anyhow::bail!("voxtype never left idle after record start -- giving up");
     }
-    if !wait_for_idle(voxtype_state_path) {
+    if !wait_for_idle(voxtype_state_path, voxtype_partial_path, on_partial) {
         anyhow::bail!("session timed out waiting for voxtype to return to idle");
     }
 
@@ -487,11 +521,30 @@ fn wait_for_recording_to_start(voxtype_state_path: &std::path::Path) -> bool {
 /// `wait_for_recording_to_start` has confirmed the session is
 /// actually underway -- see that function's docs for why calling this
 /// alone right after `record start` is a race.
-fn wait_for_idle(voxtype_state_path: &std::path::Path) -> bool {
+///
+/// Also polls `voxtype_partial_path` on the same cadence and calls
+/// `on_partial` whenever its content changes -- voxtype rewrites that
+/// file on every partial/final/replace event while streaming, so this
+/// surfaces the transcript live rather than only once at the end.
+/// Missing/empty reads (no partial yet, or a torn read racing voxtype's
+/// own write) are silently skipped, same tolerance `PopupState`'s own
+/// FileView reads use for the same reason.
+fn wait_for_idle(
+    voxtype_state_path: &std::path::Path,
+    voxtype_partial_path: &std::path::Path,
+    on_partial: impl Fn(&str),
+) -> bool {
     let start = Instant::now();
+    let mut last_partial = String::new();
     loop {
         if start.elapsed() >= SESSION_TIMEOUT {
             return false;
+        }
+        if let Ok(partial) = std::fs::read_to_string(voxtype_partial_path) {
+            if !partial.is_empty() && partial != last_partial {
+                on_partial(&partial);
+                last_partial = partial;
+            }
         }
         match std::fs::read_to_string(voxtype_state_path) {
             Ok(s) if s.trim() == "idle" => return true,

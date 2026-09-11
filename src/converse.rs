@@ -48,10 +48,10 @@
 //! than all at once when the turn completes.
 //!
 //! Reuses existing pieces rather than inventing new ones:
-//! `router::openclaw::handoff_streaming` keeps every turn on the same
-//! `CONVERSATION_ID` OpenClaw session (see `router::openclaw`'s module
-//! docs), so context carries across turns the same way it already does
-//! for the wake-word path.
+//! `router::openclaw::handoff_streaming` keeps every turn on this
+//! loop's one `ConverseConfig::session_key` OpenClaw session (see
+//! `crate::sessions`), so context carries across turns the same way it
+//! already does for the wake-word path.
 //! `pipeline::listen_and_transcribe` is the exact record+transcribe
 //! round-trip `pipeline::run_session` uses for its own single turn,
 //! just callable again per turn here, wrapped in `listen_interruptibly`
@@ -68,7 +68,7 @@ use crate::config::TtsConfig;
 use crate::conversation::{
     self, ConversationAction, ConversationPhase, ConversationState, ConversationTurn,
 };
-use crate::{pipeline, router, tts};
+use crate::{pipeline, router, sessions, tts};
 
 /// Appended to the utterance before handing off to OpenClaw -- asks it
 /// to answer the way it'd actually *say* the answer out loud, not
@@ -90,9 +90,26 @@ unless the question genuinely needs more detail to answer it.)";
 pub const DEFAULT_IDLE_TIMEOUT_SECS: u64 = 240;
 
 pub struct ConverseConfig {
+    /// Which OpenClaw session (`crate::sessions`) every turn of this
+    /// loop hands off to -- resolved once, before `run` is called
+    /// (`main.rs::run_converse_start` mints a fresh one via
+    /// `sessions::new_session()` unless `converse start --session` gave
+    /// an existing key to resume). Fixed for this loop's whole
+    /// lifetime: switching sessions means stopping this loop and
+    /// starting a new one, not changing this mid-conversation -- see
+    /// `plugin/Service.qml`'s session-picker doc comment.
+    pub session_key: String,
     pub voxtype_binary: String,
     pub transcript_path: std::path::PathBuf,
     pub voxtype_state_path: std::path::PathBuf,
+    /// voxtype's live in-progress transcript for the recording in
+    /// flight -- see `pipeline::listen_and_transcribe`'s `on_partial`
+    /// doc comment. Not yet surfaced anywhere in this loop's own UI
+    /// (the conversation panel doesn't show a live listening
+    /// transcript today, only the popup does) -- threaded through so
+    /// `listen_interruptibly` can pass the real path regardless, ready
+    /// for whenever that's wired up.
+    pub voxtype_partial_path: std::path::PathBuf,
     /// Reuses the already-running LLM `serve` instance (see
     /// `classify::Classifier`'s identical `base_url`/`model_id` shape)
     /// as a fallback summarizer -- see `spoken_text_for`.
@@ -109,6 +126,22 @@ pub struct ConverseConfig {
     /// `docs/design-notes/conversation-flow-redesign.md`'s "Idle
     /// auto-end" section).
     pub idle_timeout: std::time::Duration,
+    /// Mirrors `config::ChimeConfig::enabled` -- whether the
+    /// listen-start/sent/reply-ready cues (`chime::play`) actually
+    /// play. Found live: distracting during testing, so this defaults
+    /// off (`false`) unlike most of this crate's other opt-out
+    /// toggles -- see `config::ChimeConfig`'s doc comment.
+    pub chimes_enabled: bool,
+}
+
+/// Plays `chime` only if `cfg.chimes_enabled` -- see that field's doc
+/// comment. Every one of this module's chime calls goes through here
+/// rather than `chime::play` directly, so there's exactly one place
+/// that can forget the check.
+fn maybe_chime(cfg: &ConverseConfig, chime_kind: Chime) {
+    if cfg.chimes_enabled {
+        chime::play(chime_kind);
+    }
 }
 
 /// Runs the conversation loop until stopped. `initial_utterance`, when
@@ -140,6 +173,7 @@ pub fn run(cfg: &ConverseConfig, initial_utterance: Option<String>) -> anyhow::R
     let mut state = match &initial_utterance {
         Some(u) => ConversationState {
             active: true,
+            session_key: cfg.session_key.clone(),
             phase: Some(ConversationPhase::Thinking),
             pending_user_text: Some(u.clone()),
             turns: Vec::new(),
@@ -148,6 +182,7 @@ pub fn run(cfg: &ConverseConfig, initial_utterance: Option<String>) -> anyhow::R
         },
         None => ConversationState {
             active: true,
+            session_key: cfg.session_key.clone(),
             phase: None,
             pending_user_text: None,
             turns: Vec::new(),
@@ -161,7 +196,7 @@ pub fn run(cfg: &ConverseConfig, initial_utterance: Option<String>) -> anyhow::R
         // auto-send gets -- the wake-word path already has its
         // utterance in hand, so it skips straight to Thinking above
         // with no separate "sent" moment of its own to hang this on.
-        chime::play(Chime::Sent);
+        maybe_chime(cfg, Chime::Sent);
     }
 
     let mut pending_utterance = initial_utterance;
@@ -190,7 +225,7 @@ pub fn run(cfg: &ConverseConfig, initial_utterance: Option<String>) -> anyhow::R
                     WaitOutcome::Proceed => {
                         state.phase = Some(ConversationPhase::Listening);
                         conversation::write_state(&state);
-                        chime::play(Chime::ListenStart);
+                        maybe_chime(cfg, Chime::ListenStart);
 
                         match listen_interruptibly(cfg, &control_rx) {
                             ListenOutcome::Stop => break 'session,
@@ -217,10 +252,18 @@ pub fn run(cfg: &ConverseConfig, initial_utterance: Option<String>) -> anyhow::R
         state.pending_user_text = Some(utterance.clone());
         state.thinking_elapsed_secs = Some(0);
         conversation::write_state(&state);
-        chime::play(Chime::Sent);
+        maybe_chime(cfg, Chime::Sent);
+        // Bumps recency every turn (not just at session creation) so
+        // the picker's ordering reflects real activity, and fills in
+        // the label from whichever turn happens to be first -- the
+        // wake-word path seeds `initial_utterance` before this loop's
+        // first iteration, so that's usually turn one; a `--session`
+        // resume of an existing conversation just re-labels it the
+        // same way its first turn ever did (a no-op, see `sessions::touch`).
+        sessions::touch(&cfg.session_key, &utterance);
 
         let handoff_text = format!("{utterance}{CONVERSATIONAL_INSTRUCTION}");
-        let outcome = run_handoff_with_progress(&handoff_text, &mut state, &control_rx);
+        let outcome = run_handoff_with_progress(&handoff_text, &cfg.session_key, &mut state, &control_rx);
         state.thinking_elapsed_secs = None;
 
         let (ok, full_response) = match outcome {
@@ -238,7 +281,7 @@ pub fn run(cfg: &ConverseConfig, initial_utterance: Option<String>) -> anyhow::R
                 state.phase = Some(ConversationPhase::Listening);
                 state.pending_user_text = None;
                 conversation::write_state(&state);
-                chime::play(Chime::ListenStart);
+                maybe_chime(cfg, Chime::ListenStart);
 
                 match listen_interruptibly(cfg, &control_rx) {
                     ListenOutcome::Stop => break 'session,
@@ -273,7 +316,7 @@ pub fn run(cfg: &ConverseConfig, initial_utterance: Option<String>) -> anyhow::R
         let to_speak = spoken_summary.unwrap_or(full_response);
         state.phase = Some(ConversationPhase::Speaking);
         conversation::write_state(&state);
-        chime::play(Chime::ReplyReady);
+        maybe_chime(cfg, Chime::ReplyReady);
 
         match speak_with_barge_in(&to_speak, cfg, &control_rx) {
             SpeakOutcome::Stopped => break 'session,
@@ -283,7 +326,7 @@ pub fn run(cfg: &ConverseConfig, initial_utterance: Option<String>) -> anyhow::R
                 // for a Listen that already happened.
                 state.phase = Some(ConversationPhase::Listening);
                 conversation::write_state(&state);
-                chime::play(Chime::ListenStart);
+                maybe_chime(cfg, Chime::ListenStart);
 
                 match listen_interruptibly(cfg, &control_rx) {
                     ListenOutcome::Stop => break 'session,
@@ -401,13 +444,15 @@ enum HandoffOutcome {
 /// transcription side.
 fn run_handoff_with_progress(
     handoff_text: &str,
+    session_key: &str,
     state: &mut ConversationState,
     control_rx: &Option<mpsc::Receiver<ConversationAction>>,
 ) -> HandoffOutcome {
     let text = handoff_text.to_string();
+    let session_key = session_key.to_string();
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
-        let result = router::openclaw::handoff_streaming(&text, |chunk| {
+        let result = router::openclaw::handoff_streaming(&text, &session_key, |chunk| {
             let _ = tx.send(StreamEvent::Text(chunk.to_string()));
         });
         let _ = tx.send(StreamEvent::Done(result));
@@ -538,9 +583,16 @@ fn listen_interruptibly(
     let voxtype_binary = cfg.voxtype_binary.clone();
     let transcript_path = cfg.transcript_path.clone();
     let voxtype_state_path = cfg.voxtype_state_path.clone();
+    let voxtype_partial_path = cfg.voxtype_partial_path.clone();
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
-        let result = pipeline::listen_and_transcribe(&voxtype_binary, &transcript_path, &voxtype_state_path);
+        let result = pipeline::listen_and_transcribe(
+            &voxtype_binary,
+            &transcript_path,
+            &voxtype_state_path,
+            &voxtype_partial_path,
+            |_partial| {}, // no live-listening display in this loop yet -- see ConverseConfig::voxtype_partial_path
+        );
         let _ = tx.send(result);
     });
 
@@ -703,13 +755,16 @@ mod tests {
     // doc comment on why that path isn't unit-tested.
     fn unused_converse_config() -> ConverseConfig {
         ConverseConfig {
+            session_key: "test".to_string(),
             voxtype_binary: String::new(),
             transcript_path: std::path::PathBuf::new(),
             voxtype_state_path: std::path::PathBuf::new(),
+            voxtype_partial_path: std::path::PathBuf::new(),
             classify_base_url: String::new(),
             classify_model_id: String::new(),
             tts: crate::config::TtsConfig::default(),
             idle_timeout: Duration::from_secs(DEFAULT_IDLE_TIMEOUT_SECS),
+            chimes_enabled: false,
         }
     }
 

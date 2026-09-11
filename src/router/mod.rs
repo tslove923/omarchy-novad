@@ -353,6 +353,9 @@ pub fn bluebubbles_send(name: &str, text: &str, cfg: &BlueBubblesConfig) -> (boo
 /// `openclaw::continue_in_herdr`'s doc comment for why this is a
 /// separate, explicit action rather than part of the automatic
 /// wake-word handoff.
-pub fn openclaw_continue_in_herdr(cfg: Option<&crate::config::OpenClawConfig>) -> (bool, String) {
-    openclaw::continue_in_herdr(cfg)
+pub fn openclaw_continue_in_herdr(
+    cfg: Option<&crate::config::OpenClawConfig>,
+    session_key: &str,
+) -> (bool, String) {
+    openclaw::continue_in_herdr(cfg, session_key)
 }

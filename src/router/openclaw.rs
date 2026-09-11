@@ -217,14 +217,17 @@ pub fn strip_external_preamble(text: &str) -> String {
     result.join(" ")
 }
 
-/// All wake-word-triggered handoffs share one conversation so OpenClaw
-/// keeps context across turns (nova's own `coding_bridge.py` did the
-/// same with its in-process `_history` list) -- omarchy-novad doesn't have a
-/// per-session/per-user conversation concept yet, so this is the
-/// simplest thing that gives real continuity today. Revisit if omarchy-novad
-/// ever needs to distinguish separate voice "conversations" (e.g. a
-/// timeout-based reset, or multiple concurrent users).
-const CONVERSATION_ID: &str = "voice";
+/// Every handoff below takes a `session_key`, the bare suffix
+/// `crate::sessions` mints/tracks (`voice-<timestamp>` by default, or
+/// whatever `converse start --session` was given) -- wrapped here as
+/// `agent:main:novad:<session_key>` to build the gateway's full
+/// session key. This used to be one hardcoded constant (`"voice"`),
+/// shared by every wake-word handoff forever; `crate::sessions` is what
+/// turned that into "usually a fresh session per conversation, with a
+/// picker to resume an old one" -- see that module's doc comment.
+fn gateway_session_key(session_key: &str) -> String {
+    format!("agent:main:novad:{session_key}")
+}
 
 // ────────────────────────── streaming gateway client ──────────────────────────
 //
@@ -262,10 +265,16 @@ const WS_READ_TIMEOUT: Duration = Duration::from_secs(90);
 /// Returns `(success, reply_or_error)` with the same contract as
 /// [`handoff`]: `reply` is OpenClaw's full answer, ready to show as-is.
 ///
-/// Same conversation as `handoff` (`CONVERSATION_ID`), so a turn sent
-/// here continues the same OpenClaw session the wake-word handoff and
-/// the Herdr TUI share.
-pub fn handoff_streaming(utterance: &str, on_text: impl Fn(&str)) -> (bool, String) {
+/// `session_key` picks which OpenClaw conversation this turn continues
+/// -- see `gateway_session_key`'s doc comment. `converse::run` passes
+/// the same key for every turn of one conversation loop, so they all
+/// land in the same session; a different loop (a fresh wake-word
+/// activation, or the panel's "New Session") gets its own.
+pub fn handoff_streaming(
+    utterance: &str,
+    session_key: &str,
+    on_text: impl Fn(&str),
+) -> (bool, String) {
     let clean = utterance.trim();
     if clean.is_empty() {
         return (false, "Nothing to hand off".to_string());
@@ -282,7 +291,8 @@ pub fn handoff_streaming(utterance: &str, on_text: impl Fn(&str)) -> (bool, Stri
     let Some((device_id, public_key_pem, private_key_pem)) = device_identity() else {
         return (
             false,
-            "No OpenClaw device identity found (~/.openclaw/identity/device.json)"
+            "No OpenClaw device identity found (checked ~/.openclaw/identity/device.json \
+             and ~/.openclaw/state/openclaw.sqlite)"
                 .to_string(),
         );
     };
@@ -365,7 +375,7 @@ pub fn handoff_streaming(utterance: &str, on_text: impl Fn(&str)) -> (bool, Stri
     let send_req = serde_json::json!({
         "type": "req", "id": "c2", "method": "chat.send",
         "params": {
-            "sessionKey": format!("agent:main:novad:{CONVERSATION_ID}"),
+            "sessionKey": gateway_session_key(session_key),
             "message": clean,
             "idempotencyKey": run_id,
         }
@@ -532,10 +542,35 @@ fn set_ws_read_timeout(ws: &mut Ws, dur: Duration) {
 }
 
 /// Loads the device identity keypair the gateway requires for the
-/// connect handshake -- `~/.openclaw/identity/device.json`, the same
-/// file the `openclaw` CLI itself uses. Returns
-/// `(device_id, public_key_pem, private_key_pem)`.
+/// connect handshake. Two possible locations, tried in order:
+///
+/// 1. `~/.openclaw/identity/device.json` -- the original flat-file
+///    location, same file the `openclaw` CLI itself used to use.
+/// 2. `~/.openclaw/state/openclaw.sqlite`'s `device_identities` table
+///    -- where a recent `openclaw` CLI version moved this (confirmed
+///    live: the installed package now ships its own
+///    `state-migrations.device-identity-*.js`). Found live: after that
+///    update, (1) went empty -- nothing here failed loudly when that
+///    happened, `handoff_streaming` just reported "no device identity
+///    found," which reads like the device was never paired at all --
+///    while the *same* already-paired identity (confirmed against
+///    `openclaw devices list`: identical device id) was sitting the
+///    whole time in this new location instead.
+///
+/// Shells out to the `sqlite3` CLI (`-json` mode, parsed via
+/// `serde_json`) for (2) rather than adding a SQLite crate dependency
+/// for one read -- same shell-out philosophy this crate already uses
+/// for `voxtype`/`openclaw-handoff`/`herdr`. SQLite's WAL mode (this
+/// db uses it -- `openclaw.sqlite-wal`/`-shm` sit right next to it)
+/// allows concurrent readers, so this is safe to run even while the
+/// `openclaw` gateway/CLI itself has the db open.
+///
+/// Returns `(device_id, public_key_pem, private_key_pem)`.
 fn device_identity() -> Option<(String, String, String)> {
+    device_identity_from_json().or_else(device_identity_from_sqlite)
+}
+
+fn device_identity_from_json() -> Option<(String, String, String)> {
     let path = dirs::home_dir()?.join(".openclaw/identity/device.json");
     let content = std::fs::read_to_string(&path).ok()?;
     let v: serde_json::Value = serde_json::from_str(&content).ok()?;
@@ -543,6 +578,39 @@ fn device_identity() -> Option<(String, String, String)> {
         v["deviceId"].as_str()?.to_string(),
         v["publicKeyPem"].as_str()?.to_string(),
         v["privateKeyPem"].as_str()?.to_string(),
+    ))
+}
+
+fn device_identity_from_sqlite() -> Option<(String, String, String)> {
+    let db_path = dirs::home_dir()?.join(".openclaw/state/openclaw.sqlite");
+    if !db_path.exists() {
+        return None;
+    }
+    let output = std::process::Command::new("sqlite3")
+        .arg("-json")
+        .arg(&db_path)
+        .arg(
+            "SELECT device_id, public_key_pem, private_key_pem FROM device_identities \
+             ORDER BY updated_at_ms DESC LIMIT 1;",
+        )
+        .output()
+        .inspect_err(|e| {
+            tracing::debug!("[router:openclaw] sqlite3 device identity read failed: {e}")
+        })
+        .ok()?;
+    if !output.status.success() {
+        tracing::debug!(
+            "[router:openclaw] sqlite3 device identity query failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return None;
+    }
+    let rows: Vec<serde_json::Value> = serde_json::from_slice(&output.stdout).ok()?;
+    let row = rows.into_iter().next()?;
+    Some((
+        row["device_id"].as_str()?.to_string(),
+        row["public_key_pem"].as_str()?.to_string(),
+        row["private_key_pem"].as_str()?.to_string(),
     ))
 }
 
@@ -629,15 +697,17 @@ const CONNECT_SETTLE: Duration = Duration::from_secs(3);
 /// before it'll connect -- see this module's doc comment.
 const DEVICE_APPROVAL_MARKER: &str = "Device approval needed";
 
-/// Opens `openclaw tui` in a new Herdr tab, attached to the same
-/// gateway session `handoff` uses (`agent:main:novad:CONVERSATION_ID`)
-/// so it picks up right where the automatic handoff's reply left off --
-/// an explicit "continue this conversation" action (see this module's
-/// doc comment for why it's not part of the automatic handoff path).
-/// Mirrors OmaPilot's own `continueInHerdr` in spirit: hand authority
-/// to a real interactive session instead of a flash-and-gone popup
-/// summary.
-pub fn continue_in_herdr(cfg: Option<&crate::config::OpenClawConfig>) -> (bool, String) {
+/// Opens `openclaw tui` in a new Herdr tab, attached to `session_key`
+/// (see `gateway_session_key`) so it picks up right where that
+/// session's most recent reply left off -- an explicit "continue this
+/// conversation" action (see this module's doc comment for why it's
+/// not part of the automatic handoff path). Mirrors OmaPilot's own
+/// `continueInHerdr` in spirit: hand authority to a real interactive
+/// session instead of a flash-and-gone popup summary.
+pub fn continue_in_herdr(
+    cfg: Option<&crate::config::OpenClawConfig>,
+    session_key: &str,
+) -> (bool, String) {
     let Some((url, token)) = gateway_credentials() else {
         return (
             false,
@@ -647,7 +717,7 @@ pub fn continue_in_herdr(cfg: Option<&crate::config::OpenClawConfig>) -> (bool, 
         );
     };
 
-    let Some(script_path) = write_launch_script(&url, &token) else {
+    let Some(script_path) = write_launch_script(&url, &token, session_key) else {
         return (false, "Couldn't write the Herdr launch script".to_string());
     };
 
@@ -737,7 +807,7 @@ fn gateway_credentials() -> Option<(String, String)> {
 /// inline command string: `herdr pane run` re-lexes its trailing
 /// arguments at the target shell, which mangles quoting for anything
 /// containing its own `--flag value` pairs (found live).
-fn write_launch_script(url: &str, token: &str) -> Option<std::path::PathBuf> {
+fn write_launch_script(url: &str, token: &str, session_key: &str) -> Option<std::path::PathBuf> {
     let dir = std::env::var_os("XDG_RUNTIME_DIR")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(std::env::temp_dir)
@@ -745,8 +815,9 @@ fn write_launch_script(url: &str, token: &str) -> Option<std::path::PathBuf> {
     std::fs::create_dir_all(&dir).ok()?;
     let path = dir.join("openclaw-herdr.sh");
 
+    let gateway_session = gateway_session_key(session_key);
     let script = format!(
-        "#!/usr/bin/env bash\nexec openclaw tui --session agent:main:novad:{CONVERSATION_ID} \
+        "#!/usr/bin/env bash\nexec openclaw tui --session {gateway_session} \
          --url {url:?} --token {token:?}\n"
     );
     let mut file = std::fs::OpenOptions::new()

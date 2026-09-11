@@ -65,6 +65,16 @@ pub struct PopupState {
     /// `Confirming` for a `Message` — see
     /// `router::RouteResult::NeedsConfirmation`'s `editable` field.
     pub editable: bool,
+    /// Mirrors `config::PopupConfig::auto_approve` -- whether the UI
+    /// should run the auto-approve countdown (slider fill + timed
+    /// `respond approve`) during `Confirming`. Present on every state
+    /// write, same as `editable`, even though only meaningful during
+    /// `Confirming` -- one less thing for the QML side to track across
+    /// phase changes.
+    pub auto_approve: bool,
+    /// Mirrors `config::PopupConfig::auto_approve_timeout_secs` -- how
+    /// long the slider takes to fill.
+    pub auto_approve_timeout_secs: f32,
 }
 
 impl Default for PopupState {
@@ -74,6 +84,9 @@ impl Default for PopupState {
             text: String::new(),
             confirm_label: None,
             editable: false,
+            auto_approve: crate::config::PopupConfig::default().auto_approve,
+            auto_approve_timeout_secs: crate::config::PopupConfig::default()
+                .auto_approve_timeout_secs,
         }
     }
 }
@@ -240,4 +253,41 @@ pub fn respond(action: &str, text: Option<&str>) -> anyhow::Result<()> {
     };
     writeln!(stream, "{}", serde_json::to_string(&msg)?)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_state_mirrors_popup_config_defaults() {
+        // Regression guard for a typo'd/forgotten field here going
+        // out of sync with config::PopupConfig's own defaults --
+        // `crate::config::load()` on a missing/partial config.toml
+        // deserializes `[popup]` to `PopupConfig::default()`, so this
+        // is what every state write looks like before the first real
+        // `NeedsConfirmation` ever overrides it.
+        let state = PopupState::default();
+        let default_cfg = crate::config::PopupConfig::default();
+        assert_eq!(state.auto_approve, default_cfg.auto_approve);
+        assert_eq!(
+            state.auto_approve_timeout_secs,
+            default_cfg.auto_approve_timeout_secs
+        );
+    }
+
+    #[test]
+    fn state_serializes_auto_approve_fields() {
+        let state = PopupState {
+            phase: PopupPhase::Confirming,
+            text: "hi".to_string(),
+            confirm_label: Some("Text Jessica".to_string()),
+            editable: true,
+            auto_approve: true,
+            auto_approve_timeout_secs: 3.0,
+        };
+        let json = serde_json::to_string(&state).unwrap();
+        assert!(json.contains("\"auto_approve\":true"));
+        assert!(json.contains("\"auto_approve_timeout_secs\":3.0"));
+    }
 }

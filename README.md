@@ -186,6 +186,13 @@ api_hash = "..."
 [tts]
 # serve_url = "http://127.0.0.1:8421"
 # voice = "af_nova"
+
+[popup]
+# auto_approve = true
+# auto_approve_timeout_secs = 3.0
+
+[chime]
+# enabled = false
 ```
 
 See [Home Assistant setup](#home-assistant-setup),
@@ -395,9 +402,11 @@ It runs `openclaw agent --agent main --session-key
 agent:main:novad:<conversation> --message <utterance> --json`,
 sanitizes the conversation-id segment, and prints the reply's text on
 stdout (or a fallback line on stderr and a non-zero exit on failure).
-All wake-word-triggered handoffs currently share one conversation id
-(`"voice"`, see `CONVERSATION_ID` in `openclaw.rs`) so OpenClaw keeps
-context turn to turn.
+(This script predates the gateway WebSocket path `converse`/the
+automatic wake-word handoff actually use now — see
+[Sessions](#sessions) for how those pick a conversation id today;
+nothing in this project currently shells out to this script, but it's
+left here as a minimal standalone bridge for anything that wants one.)
 
 ### Verify
 
@@ -419,9 +428,10 @@ button) until you run `omarchy-novad converse stop`.
 ### Continuing a conversation in Herdr
 
 `omarchy-novad openclaw continue-in-herdr` opens `openclaw tui` in a
-new Herdr tab, attached to the exact same session (`agent:main:novad:
-voice`) the automatic handoff above uses — so it picks up right where
-the last reply left off, full history included. Deliberately a
+new Herdr tab, attached to whichever OpenClaw session is currently
+active (or, if none is running right now, the most recently active one
+— see [Sessions](#sessions)) — so it picks up right where that
+session's last reply left off, full history included. Deliberately a
 separate, explicit action rather than part of the automatic handoff:
 `openclaw tui` is a persistent interactive session, and unlike the
 one-shot `openclaw agent --message` bridge, the gateway requires a
@@ -468,9 +478,11 @@ the panel's Record button; the daemon never starts one on its own
 between turns), voxtype records until its own silence-timeout or you
 end it early (`converse stop-listening`), and the transcript is handed
 straight to OpenClaw the moment it's ready -- no review/confirm step.
-`router::handoff_external` sends it (same `agent:main:novad:voice`
-session the plain one-shot handoff used to use — so context carries
-over the same way); OpenClaw's *full* reply shows in a dedicated
+`router::handoff_external` sends it to an OpenClaw session (see
+[Sessions](#sessions) below — every conversation gets its own fresh one
+by default, so context carries over turn to turn the same way it
+always did, just no longer forever on one single shared session);
+OpenClaw's *full* reply shows in a dedicated
 Quickshell window (`quickshell/OpenClawConversation.qml`, or the
 plugin's `ConversationPanel.qml`), streaming in live as it's produced,
 and a shorter conversational summary of it is spoken out loud. The
@@ -563,6 +575,31 @@ omarchy-novad converse stop   # or Ctrl+C the running process
 Point `detect --on-detect` (or `[detect] on_detect` in config.toml) at
 `omarchy-novad converse start` to trigger it hands-free from the wake
 word instead of typing it.
+
+### Sessions
+
+Every conversation loop -- a wake-word activation, `converse start`
+with no flags, or picking "+ New Session" in the panel -- gets its own
+fresh OpenClaw session by default (`src/sessions.rs`), so an old
+tangent never bleeds into a new one just because you said the wake
+word again. Sessions are tracked in a small local registry
+(`$XDG_RUNTIME_DIR/omarchy-novad/sessions.json`, cleared on
+logout/reboot -- OpenClaw has no "list sessions" API of its own, so
+this is purely a local memory of which ones this daemon has minted)
+and shown in the plugin panel's **Sessions** dropdown, most recently
+active first. Picking an old one there resumes it (stopping the
+current loop first, if one's running); the daemon-side flag behind it
+is:
+
+```bash
+omarchy-novad converse start --session <key>   # resume an existing session
+omarchy-novad converse start                   # (default) start a fresh one
+```
+
+`omarchy-novad openclaw continue-in-herdr` (see [Continuing a
+conversation in Herdr](#continuing-a-conversation-in-herdr)) follows
+the same session: whichever one's currently active, or the most
+recently active one if none is running right now.
 
 ### How the spoken summary is derived
 

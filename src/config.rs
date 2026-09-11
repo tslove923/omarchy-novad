@@ -41,6 +41,55 @@ pub struct Config {
     pub openclaw: Option<OpenClawConfig>,
     #[serde(default)]
     pub tts: TtsConfig,
+    #[serde(default)]
+    pub popup: PopupConfig,
+    #[serde(default)]
+    pub chime: ChimeConfig,
+}
+
+/// Whether `crate::chime::play()`'s listen-start/sent/reply-ready
+/// audio cues (see `converse::maybe_chime`) actually play during an
+/// OpenClaw voice conversation. Found live: distracting/"super
+/// annoying" during testing, so this defaults to `false` (`bool`'s own
+/// derived default) -- unlike most of this crate's other opt-out
+/// toggles, this one ships off and has to be turned on.
+#[derive(Debug, Clone, Copy, Default, Deserialize)]
+#[serde(default)]
+pub struct ChimeConfig {
+    pub enabled: bool,
+}
+
+/// The confirm popup's auto-approve behavior -- see
+/// `router::RouteResult::NeedsConfirmation` (a BlueBubbles/Telegram
+/// message or a terminal command awaiting Approve/Deny). Applies
+/// uniformly to every confirmation kind; terminal commands already
+/// have a hard, unconditional block on genuinely dangerous patterns
+/// (`router::terminal::is_blocked`) before anything reaches the popup
+/// at all, so what's left to auto-approve here is already past that
+/// floor, same as a manual Approve click would be.
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(default)]
+pub struct PopupConfig {
+    /// Auto-approve a pending confirmation after `auto_approve_timeout_secs`
+    /// of it being shown, instead of waiting indefinitely for an
+    /// explicit click. Never silent: the popup shows a slider filling
+    /// over the Approve button the whole time, and Deny (or an early
+    /// Approve) at any point cancels it -- see `plugin/PopupCard.qml`.
+    pub auto_approve: bool,
+    /// How long the slider takes to fill, in seconds. Whatever's
+    /// currently in the edit box (if the confirmation is editable) at
+    /// the moment it fires is what gets sent, same as clicking Approve
+    /// manually would send.
+    pub auto_approve_timeout_secs: f32,
+}
+
+impl Default for PopupConfig {
+    fn default() -> Self {
+        Self {
+            auto_approve: true,
+            auto_approve_timeout_secs: 3.0,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]

@@ -44,6 +44,14 @@ pub enum PopupPhase {
     HandingOff,
     Confirming,
     Ready,
+    /// This machine lost multi-instance wake-word arbitration (see
+    /// `crate::arbitration`) -- shown briefly (a few seconds, then
+    /// auto-dismissed) instead of the normal card, naming which
+    /// machine is actually handling the request. Deliberately its own
+    /// phase rather than reusing `Ready`: it needs a much shorter
+    /// dismiss timeout (acknowledgment, not content worth reading) and
+    /// a visibly quieter treatment -- see `PopupCard.qml`.
+    HandedOff,
 }
 
 #[derive(Debug, Clone, Serialize)]

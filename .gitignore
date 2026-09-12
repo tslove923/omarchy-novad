@@ -4,3 +4,7 @@ target/
 # Local PATH shim for `omarchy-novad respond` (see README's Setup) --
 # a machine-specific symlink into target/, not something to commit.
 /bin/
+
+# Claude Code agent worktrees (isolated copies for background subagent
+# tasks) -- session-local tooling state, not project content.
+/.claude/

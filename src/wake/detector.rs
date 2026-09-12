@@ -30,6 +30,16 @@ pub struct Detection {
     pub primary_score: f32,
     pub verifier_score: f32,
     pub model: String,
+    /// Normalized 0.0-1.0 loudness (sample RMS / i16::MAX) of the audio
+    /// chunk that made this detection fire -- not a property of the
+    /// wake-word model itself, added purely for
+    /// `crate::arbitration`'s "who did the speaker actually address"
+    /// signal (see docs/design-notes/multi-instance-wake-arbitration.md
+    /// -- `score` is deliberately volume-invariant by training, so it's
+    /// a poor proxy for that). Computed once per detection, not per
+    /// frame, so this is free relative to the NPU inference dominating
+    /// this same call.
+    pub rms: f32,
 }
 
 /// Streaming wake word detector with NPU acceleration.
@@ -55,6 +65,17 @@ pub struct Detector {
     total_frames: u64,
 
     inference_times: VecDeque<Duration>,
+}
+
+/// Normalized 0.0-1.0 RMS loudness of `audio` -- see
+/// `Detection::rms`'s doc comment for why this exists.
+fn rms(audio: &[i16]) -> f32 {
+    if audio.is_empty() {
+        return 0.0;
+    }
+    let sum_sq: f64 = audio.iter().map(|&s| (s as f64) * (s as f64)).sum();
+    let mean_sq = sum_sq / audio.len() as f64;
+    (mean_sq.sqrt() / i16::MAX as f64) as f32
 }
 
 impl Detector {
@@ -125,6 +146,7 @@ impl Detector {
                     primary_score: p1,
                     verifier_score: p2,
                     model: self.wakeword.clone(),
+                    rms: rms(audio),
                 });
                 self.prediction_buffer.clear();
             }

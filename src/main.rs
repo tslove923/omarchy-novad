@@ -1,3 +1,4 @@
+mod arbitration;
 mod chime;
 mod classify;
 mod config;
@@ -181,6 +182,34 @@ enum Command {
         #[command(subcommand)]
         what: ConverseCommand,
     },
+
+    /// Multi-instance wake-word arbitration debug tools -- see
+    /// `arbitration`'s module docs and
+    /// docs/design-notes/multi-instance-wake-arbitration.md.
+    Arbitration {
+        #[command(subcommand)]
+        what: ArbitrationCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum ArbitrationCommand {
+    /// Runs one real arbitration round against whatever peers this
+    /// machine can currently discover/reach, using a synthetic
+    /// detection instead of a real wake-word trigger -- lets you check
+    /// discovery, priority, and timing are working the way you expect
+    /// without needing to actually say the wake word on every machine
+    /// at once. Requires `[arbitration].enabled = true` in config.toml.
+    Test {
+        /// Fake RMS loudness for this synthetic detection (0.0-1.0).
+        #[arg(long, default_value_t = 0.5)]
+        rms: f32,
+        /// Fake wake-word confidence score (0.0-1.0).
+        #[arg(long, default_value_t = 0.9)]
+        score: f32,
+        #[arg(long, default_value = "hey_jarvis")]
+        wakeword: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -330,6 +359,7 @@ fn main() -> anyhow::Result<()> {
                 file_config.tts,
                 file_config.popup,
                 file_config.chime,
+                file_config.arbitration,
             )
         }
         Command::Serve {
@@ -415,7 +445,43 @@ fn main() -> anyhow::Result<()> {
         Command::Converse {
             what: ConverseCommand::SendText { text },
         } => conversation::send_text(&text),
+        Command::Arbitration {
+            what: ArbitrationCommand::Test { rms, score, wakeword },
+        } => run_arbitration_test(file_config.arbitration, rms, score, &wakeword),
     }
+}
+
+fn run_arbitration_test(
+    cfg: config::ArbitrationConfig,
+    rms: f32,
+    score: f32,
+    wakeword: &str,
+) -> anyhow::Result<()> {
+    if !cfg.enabled {
+        anyhow::bail!("[arbitration] is not enabled in config.toml -- set enabled = true first");
+    }
+    println!("[omarchy-novad] Starting arbitrator (discovery={:?}, window={}ms, priority={})...", cfg.discovery, cfg.window_ms, cfg.priority);
+    let Some(mut arbitrator) = arbitration::Arbitrator::new(&cfg)? else {
+        anyhow::bail!("arbitrator unexpectedly disabled"); // unreachable given the enabled check above
+    };
+    let detection = wake::detector::Detection {
+        timestamp: std::time::SystemTime::now(),
+        score,
+        primary_score: score,
+        verifier_score: score,
+        model: wakeword.to_string(),
+        rms,
+    };
+    println!("[omarchy-novad] Announcing a synthetic detection (rms={rms:.3}, score={score:.3})...");
+    match arbitrator.arbitrate(&detection, wakeword) {
+        arbitration::ArbitrationOutcome::Proceed => {
+            println!("[omarchy-novad] Result: PROCEED -- this machine would have handled the request.");
+        }
+        arbitration::ArbitrationOutcome::BackOff { winner_hostname } => {
+            println!("[omarchy-novad] Result: BACK OFF -- lost to {winner_hostname}.");
+        }
+    }
+    Ok(())
 }
 
 fn run_classify(text: &str, base_url: &str, model_id: &str) -> anyhow::Result<()> {
@@ -718,10 +784,15 @@ fn run_detect(
     tts: config::TtsConfig,
     popup: config::PopupConfig,
     chime: config::ChimeConfig,
+    arbitration: config::ArbitrationConfig,
 ) -> anyhow::Result<()> {
     let trigger = resolve_trigger(on_detect);
     let detector = Detector::new(wakeword, device, &cache_dir(), threshold, patience)?;
     let mut listener = WakeWordListener::new(detector, None);
+    let mut arbitrator = arbitration::Arbitrator::new(&arbitration)?;
+    if arbitrator.is_some() {
+        println!("[omarchy-novad] Multi-instance arbitration enabled (port {}).", arbitration.port);
+    }
 
     println!(
         "[omarchy-novad] Listening for '{wakeword}' (device={device}, threshold={threshold})..."
@@ -782,17 +853,36 @@ fn run_detect(
                     "\n[omarchy-novad] Wake word detected! score={:.3}",
                     detection.score
                 );
-                match &trigger {
-                    // Blocks this thread for the whole session (record
-                    // -> transcribe -> classify -> route -> popup) --
-                    // deliberately: it means no audio chunk is fed to
-                    // the detector while a session is already running,
-                    // so there's no risk of double-triggering on the
-                    // recording's own audio the way a non-blocking
-                    // design would need extra state to prevent. Queued
-                    // mic samples just wait in `rx` until this returns.
-                    Trigger::VoxtypeDictation => pipeline::run_session(&pipeline_cfg),
-                    Trigger::OneShotCommand(cmd) => run_shell(cmd),
+
+                // See docs/design-notes/multi-instance-wake-arbitration.md.
+                // `arbitrator` is `None` whenever `[arbitration].enabled`
+                // is `false` (the default) -- no socket touched, no wait
+                // incurred, identical to today. With it `Some`, this
+                // blocks (bounded by `window_ms`) even for the eventual
+                // winner, same shape of blocking `pipeline::run_session`
+                // already does for a session's whole duration.
+                let outcome = match arbitrator.as_mut() {
+                    None => arbitration::ArbitrationOutcome::Proceed,
+                    Some(a) => a.arbitrate(&detection, wakeword),
+                };
+
+                match outcome {
+                    arbitration::ArbitrationOutcome::Proceed => match &trigger {
+                        // Blocks this thread for the whole session (record
+                        // -> transcribe -> classify -> route -> popup) --
+                        // deliberately: it means no audio chunk is fed to
+                        // the detector while a session is already running,
+                        // so there's no risk of double-triggering on the
+                        // recording's own audio the way a non-blocking
+                        // design would need extra state to prevent. Queued
+                        // mic samples just wait in `rx` until this returns.
+                        Trigger::VoxtypeDictation => pipeline::run_session(&pipeline_cfg),
+                        Trigger::OneShotCommand(cmd) => run_shell(cmd),
+                    },
+                    arbitration::ArbitrationOutcome::BackOff { winner_hostname } => {
+                        println!("[omarchy-novad] Lost arbitration to {winner_hostname} -- staying quiet.");
+                        show_handed_off_and_wait(&winner_hostname);
+                    }
                 }
                 listener.reset();
             }
@@ -800,6 +890,26 @@ fn run_detect(
     }
 
     Ok(())
+}
+
+/// Shows the "heard by <hostname>" popup for a losing multi-instance
+/// arbitration round (see `arbitration::ArbitrationOutcome::BackOff`),
+/// then clears it after a brief, self-dismissing window -- shorter
+/// than `pipeline::show_ready_and_wait`'s, since this is
+/// acknowledgment, not content worth reading. Lives here rather than
+/// in `pipeline.rs`: it's a `run_detect`-level concern (arbitration
+/// itself is), not part of the record/transcribe/classify/route
+/// pipeline that module owns.
+fn show_handed_off_and_wait(winner_hostname: &str) {
+    popup::write_state(&popup::PopupState {
+        phase: popup::PopupPhase::HandedOff,
+        text: format!("Heard by {winner_hostname}"),
+        confirm_label: None,
+        editable: false,
+        ..popup::PopupState::default()
+    });
+    std::thread::sleep(std::time::Duration::from_secs(2));
+    popup::write_state(&popup::PopupState::default());
 }
 
 fn run_shell(cmd: &str) {

@@ -163,6 +163,10 @@ PanelWindow {
         case "handing_off": return OmarchyTheme.accent;
         case "confirming": return OmarchyTheme.yellow;
         case "ready": return OmarchyTheme.green;
+        // Muted rather than any of the "something is happening" colors
+        // above -- see phaseLabel/the text color override below, this
+        // is meant to read as a quiet FYI, not an active state.
+        case "handed_off": return emptyColor;
         default: return buttonBorder;
         }
     }
@@ -196,6 +200,10 @@ PanelWindow {
         case "handing_off": return "Asking OpenClaw…";
         case "confirming": return "Confirm";
         case "ready": return "Ready";
+        // No separate tag -- the main text below already says
+        // "Heard by <hostname>", a status label on top would be
+        // redundant for something meant to read as brief and quiet.
+        case "handed_off": return "";
         default: return "";
         }
     }
@@ -292,9 +300,15 @@ PanelWindow {
             Text {
                 width: parent.width
                 text: root.text_.length > 0 ? root.text_ : "…"
-                color: root.text_.length > 0 ? root.textColor : root.emptyColor
+                // Deliberately muted even when there's real text, only
+                // for "handed_off" -- this is acknowledgment, not
+                // content the user needs to read closely (see
+                // popup::PopupPhase::HandedOff's doc comment).
+                color: root.phase === "handed_off"
+                    ? root.emptyColor
+                    : (root.text_.length > 0 ? root.textColor : root.emptyColor)
                 font.family: "JetBrains Mono"
-                font.pixelSize: 14
+                font.pixelSize: root.phase === "handed_off" ? 12 : 14
                 wrapMode: Text.Wrap
                 visible: root.phase !== "idle" && !root.editBoxVisible
             }

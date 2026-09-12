@@ -45,6 +45,8 @@ pub struct Config {
     pub popup: PopupConfig,
     #[serde(default)]
     pub chime: ChimeConfig,
+    #[serde(default)]
+    pub arbitration: ArbitrationConfig,
 }
 
 /// Whether `crate::chime::play()`'s listen-start/sent/reply-ready
@@ -90,6 +92,68 @@ impl Default for PopupConfig {
             auto_approve_timeout_secs: 3.0,
         }
     }
+}
+
+/// Multi-instance wake-word arbitration -- lets more than one
+/// omarchy-novad instance on the same network coordinate so exactly
+/// one of them answers a given "hey jarvis," instead of every machine
+/// within earshot independently starting its own session. See
+/// `crate::arbitration` and
+/// docs/design-notes/multi-instance-wake-arbitration.md for the full
+/// design. Off by default -- single-machine is and stays the common
+/// case, and `enabled = false` means the arbitration module is never
+/// even constructed (see `main.rs::run_detect`), so this costs nothing
+/// for anyone who hasn't turned it on.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct ArbitrationConfig {
+    pub enabled: bool,
+    /// UDP port used for both mDNS service resolution and the actual
+    /// unicast arbitration traffic.
+    pub port: u16,
+    /// Pin mDNS advertise/browse and outgoing arbitration sends to one
+    /// interface on a multi-homed machine (e.g. "wlan0"). Empty lets
+    /// the OS pick.
+    pub bind_interface: String,
+    /// "mdns" (default): discover peers automatically. "static": skip
+    /// mDNS entirely, talk only to `peers`.
+    pub discovery: DiscoveryMode,
+    /// This machine's own tie-break weight, stamped into every
+    /// announcement it sends -- see `crate::arbitration::beats`. Only
+    /// matters when RMS and confidence are both too close to call
+    /// between two machines; set higher on a machine that should win
+    /// those close calls (e.g. the one the user is usually closer to).
+    pub priority: i32,
+    /// Explicit peer addresses ("hostname:port" or "ip:port"), for a
+    /// peer mDNS can't reach, or the sole peer source when
+    /// `discovery = "static"`. Also where every peer actually heard
+    /// from gets recorded once discovered -- see
+    /// `crate::arbitration::peers`.
+    pub peers: Vec<String>,
+    /// How long to wait for competing announcements before deciding,
+    /// in milliseconds.
+    pub window_ms: u64,
+}
+
+impl Default for ArbitrationConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            port: 51530,
+            bind_interface: String::new(),
+            discovery: DiscoveryMode::Mdns,
+            priority: 0,
+            peers: Vec::new(),
+            window_ms: 400,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DiscoveryMode {
+    Mdns,
+    Static,
 }
 
 #[derive(Debug, Clone, Deserialize)]

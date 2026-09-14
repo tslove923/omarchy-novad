@@ -349,6 +349,42 @@ PanelWindow {
                     wrapMode: TextEdit.Wrap
                     selectByMouse: true
                     focus: root.editBoxVisible
+
+                    // Once the user actually changes the pre-filled
+                    // text, the auto-approve countdown stops -- editing
+                    // is a clear "I'm not done with this yet" signal,
+                    // and letting the timer keep running while they're
+                    // mid-correction risked auto-sending a half-edited
+                    // message out from under them. Compares against
+                    // root.text_ rather than tracking a separate
+                    // "dirty" flag: the box's own initial `text:
+                    // root.text_` binding assignment above also fires
+                    // onTextChanged, and this is what tells that apart
+                    // from a real edit -- they're still equal at that
+                    // point, so nothing stops until the text actually
+                    // diverges.
+                    onTextChanged: if (editField.text !== root.text_) autoApproveTicker.stop();
+
+                    // Enter sends the edited text immediately, same as
+                    // clicking Approve -- the point of stopping the
+                    // timer above is to hand control back to the user,
+                    // not to strand them with no way to send at all.
+                    // Shift+Enter still inserts a literal newline for a
+                    // genuinely multi-line message.
+                    Keys.onReturnPressed: (event) => {
+                        if (event.modifiers & Qt.ShiftModifier) {
+                            event.accepted = false;
+                        } else {
+                            autoApproveTicker.stop();
+                            root.respond("approve", editField.text);
+                            event.accepted = true;
+                        }
+                    }
+                    Keys.onEnterPressed: (event) => {
+                        autoApproveTicker.stop();
+                        root.respond("approve", editField.text);
+                        event.accepted = true;
+                    }
                 }
             }
 

@@ -167,6 +167,22 @@ QtObject {
     // sticks until the next activation.
     property bool _prevConversationActive: false
     property string _prevConversationPhase: ""
+    // Whether _conversationStateView has completed its first real load
+    // yet -- the auto-show trigger below is skipped entirely for that
+    // one load (just syncs the prev-state trackers to the file's
+    // actual contents, silently). Found live: conversation-state.json
+    // can be left with `active: true` by a `converse start` process
+    // that didn't exit cleanly (a crash, or the shell/machine going
+    // down mid-conversation, rather than a real `converse stop`) --
+    // with no guard, every quickshell restart after that reads the
+    // same stale `active: true`, sees `_prevConversationActive`'s
+    // freshly-defaulted `false`, and treats stale leftover state as a
+    // brand new activation, popping the panel open on every single
+    // load with nothing behind it. A transition can only be real once
+    // this instance has already observed a baseline to transition
+    // *from* -- the very first load establishes that baseline, it
+    // doesn't witness a transition.
+    property bool _conversationStateEverLoaded: false
 
     readonly property var latestTurn: conversationTurns.length > 0
         ? conversationTurns[conversationTurns.length - 1] : null
@@ -205,15 +221,19 @@ QtObject {
                 //     you to trigger the next turn)
                 const wasActive = root._prevConversationActive;
                 const wasPhase = root._prevConversationPhase;
+                const isFirstLoad = !root._conversationStateEverLoaded;
+                root._conversationStateEverLoaded = true;
                 root._prevConversationActive = root.conversationActive;
                 root._prevConversationPhase = root.conversationPhase;
-                const enteredThinking = root.conversationPhase === "thinking" && wasPhase !== "thinking";
-                const enteredSpeaking = root.conversationPhase === "speaking" && wasPhase !== "speaking";
-                const backToIdleAwaitingInput = root.conversationActive && root.conversationPhase === ""
-                    && (wasPhase === "thinking" || wasPhase === "speaking");
-                if ((root.conversationActive && !wasActive)
-                    || enteredThinking || enteredSpeaking || backToIdleAwaitingInput) {
-                    root.panelVisible = true;
+                if (!isFirstLoad) {
+                    const enteredThinking = root.conversationPhase === "thinking" && wasPhase !== "thinking";
+                    const enteredSpeaking = root.conversationPhase === "speaking" && wasPhase !== "speaking";
+                    const backToIdleAwaitingInput = root.conversationActive && root.conversationPhase === ""
+                        && (wasPhase === "thinking" || wasPhase === "speaking");
+                    if ((root.conversationActive && !wasActive)
+                        || enteredThinking || enteredSpeaking || backToIdleAwaitingInput) {
+                        root.panelVisible = true;
+                    }
                 }
             } catch (e) {
                 // Same non-atomic-write caveat as popup-state.json above.
@@ -232,6 +252,7 @@ QtObject {
             root.conversationSessionKey = "";
             root._prevConversationActive = false;
             root._prevConversationPhase = "";
+            root._conversationStateEverLoaded = false;
         }
 
         onFileChanged: reload()

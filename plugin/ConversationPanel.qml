@@ -141,6 +141,24 @@ PanelWindow {
         if (root.service) root.service.stopConversation();
     }
 
+    // Escape: end the conversation AND hide the panel in one keypress --
+    // the panic button for a false wake-word activation. Deliberately
+    // more than the Stop button alone (which only ends the conversation,
+    // leaving the panel up) -- a false activation is exactly the moment
+    // you want the whole thing gone with the least possible effort, not
+    // a stop click followed by a second dismiss. `converse stop` only
+    // asks the loop to end after its current turn (see
+    // conversation::stop's doc comment) rather than killing it
+    // instantly, but hiding the panel immediately here means it's out
+    // of sight right away regardless of how long that takes to actually
+    // land -- see `panel`'s `Keys.onEscapePressed` below for where this
+    // is wired up, and why it works without clicking into the panel
+    // first.
+    function killConversation() {
+        root.stopConversation();
+        if (root.service) root.service.panelVisible = false;
+    }
+
     // Starts a new recording for the next turn -- the daemon never
     // starts one on its own between turns, see converse.rs's module
     // doc comment.
@@ -177,6 +195,24 @@ PanelWindow {
 
         radius: 10
         color: root.bgColor
+
+        // Grabs keyboard focus the instant the panel becomes visible
+        // (not on a click -- see `killConversation`'s doc comment: a
+        // false activation needs Escape to work immediately, with no
+        // extra interaction first). Safe to do unconditionally, unlike
+        // the OmaPilot input-grab freeze this project hit once before
+        // (see git history / CLAUDE.local.md): that bug was "grabs
+        // focus with no way to release it," not "grabbing focus is
+        // inherently risky" -- Escape below is exactly the release
+        // valve that was missing there. Bubbles up from the chat
+        // TextEdit's own focus too (a plain TextEdit doesn't consume
+        // Escape), so this fires whether or not the user has clicked
+        // into the chat box.
+        focus: root.visible
+        Keys.onEscapePressed: (event) => {
+            root.killConversation();
+            event.accepted = true;
+        }
 
         // ── Header: title + Stop button ──
         Item {

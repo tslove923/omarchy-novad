@@ -1,1 +1,10 @@
 singleton OmarchyTheme 1.0 OmarchyTheme.qml
+AnimatedBorder 1.0 AnimatedBorder.qml
+BarWidget 1.0 BarWidget.qml
+ContextMenuItem 1.0 ContextMenuItem.qml
+ConversationPanel 1.0 ConversationPanel.qml
+Overlay 1.0 Overlay.qml
+PopupButton 1.0 PopupButton.qml
+PopupCard 1.0 PopupCard.qml
+Service 1.0 Service.qml
+VoiceVisualizer 1.0 VoiceVisualizer.qml

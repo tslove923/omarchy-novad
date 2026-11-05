@@ -295,6 +295,20 @@ enum ConverseCommand {
         #[arg(long)]
         text: String,
     },
+    /// Diagnose the configured TTS backend order: print the resolved
+    /// priority (first = primary), ping each backend's health endpoint,
+    /// and synthesize a short WAV through the real dispatcher (so a
+    /// primary outage demonstrates the fallback path). Writes the audio
+    /// next to --out instead of playing it. Does not touch a running
+    /// conversation loop.
+    Probe {
+        /// Sentence to synthesize.
+        #[arg(long, default_value = "Systems online, sir.")]
+        text: String,
+        /// Where to write the produced WAV.
+        #[arg(long, default_value = "/tmp/omarchy-novad-tts-probe.wav")]
+        out: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -431,6 +445,9 @@ fn main() -> anyhow::Result<()> {
             file_config.chime,
         ),
         Command::Converse {
+            what: ConverseCommand::Probe { text, out },
+        } => run_tts_probe(&text, &out, file_config.tts),
+        Command::Converse {
             what: ConverseCommand::Stop,
         } => conversation::stop(),
         Command::Converse {
@@ -556,6 +573,32 @@ fn run_openclaw_continue_in_herdr(openclaw: Option<config::OpenClawConfig>) -> a
     } else {
         std::process::exit(1);
     }
+}
+
+/// `converse probe` -- see that subcommand's doc comment. Prints the
+/// resolved backend order first, then each backend's health check,
+/// then synthesizes through `tts::synthesize_for_diagnostics` (same
+/// ordering + fallback code the voice loop uses) and writes the WAV.
+fn run_tts_probe(text: &str, out: &str, cfg: config::TtsConfig) -> anyhow::Result<()> {
+    let plan = tts::describe_config(&cfg);
+    println!("[probe] backend priority (first = primary):");
+    for (i, (name, kind, url, health)) in plan.iter().enumerate() {
+        let role = if i == 0 { "PRIMARY" } else { "fallback" };
+        println!("  {}. {name} [{kind}] {url} -- {role}, health: {health}", i + 1);
+    }
+    println!(
+        "[probe] fallback_timeout_secs = {}",
+        cfg.fallback_timeout_secs
+    );
+    let t0 = std::time::Instant::now();
+    let (wav, used) = tts::synthesize_for_diagnostics(&cfg, text)?;
+    std::fs::write(out, &wav)?;
+    println!(
+        "[probe] synthesized {} bytes via {used} in {:.2}s -> {out}",
+        wav.len(),
+        t0.elapsed().as_secs_f64()
+    );
+    Ok(())
 }
 
 fn run_converse_start(

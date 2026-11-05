@@ -422,10 +422,59 @@ pub struct OpenClawConfig {
 #[serde(default)]
 pub struct TtsConfig {
     /// Base URL of the running TTS server.
+    ///
+    /// Retained as the *secondary* (Kokoro) endpoint for backwards
+    /// compatibility with existing config.toml files and CLI flags --
+    /// prefer `[[tts.backends]]` for anything new. When
+    /// `[[tts.backends]]` is non-empty this field is only used as
+    /// Kokoro's URL if no backend explicitly names Kokoro.
     pub serve_url: String,
     /// Kokoro voice id -- see tts-server/README.md for the full list
-    /// bundled in `voices-v1.0.bin`.
+    /// bundled in `voices-v1.0.bin`. Applies to the Kokoro backend only.
     pub voice: String,
+    /// Ordered TTS backends: **first entry is primary, the rest are
+    /// fallbacks in order**. Empty (the default) synthesizes the
+    /// legacy single-backend list from `serve_url`/`voice` above, so an
+    /// existing config keeps working untouched.
+    ///
+    /// Ordering lives here, in configuration, deliberately -- not as an
+    /// if/else buried in `crate::tts` -- so "Jarvis primary, Kokoro
+    /// secondary" is readable, reviewable and reorderable without a
+    /// rebuild.
+    pub backends: Vec<TtsBackendConfig>,
+    /// Give up on a backend and try the next one if it hasn't produced
+    /// audio within this many seconds. Applies per sentence.
+    pub fallback_timeout_secs: u64,
+}
+
+/// One TTS backend entry in `[[tts.backends]]`. The wire format is
+/// selected by `kind`; everything else is per-kind.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct TtsBackendConfig {
+    /// Human-readable name used in log lines ("jarvis", "kokoro").
+    pub name: String,
+    /// `"pocket"` (Kyutai Pocket TTS, multipart `/tts`) or `"kokoro"`
+    /// (JSON `/synthesize`). See `crate::tts::BackendKind`.
+    pub kind: String,
+    /// Base URL of that server. The only place a TTS URL is declared.
+    pub url: String,
+    /// Voice override. Kokoro: the voice id inside `voices-v1.0.bin`.
+    /// Pocket: an `http(s)://`/`hf://` reference URL, or a local WAV
+    /// path on *this* host that is uploaded as the clone prompt; empty
+    /// uses that server's configured default voice.
+    pub voice: String,
+}
+
+impl Default for TtsBackendConfig {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            kind: String::new(),
+            url: String::new(),
+            voice: String::new(),
+        }
+    }
 }
 
 impl Default for TtsConfig {
@@ -433,6 +482,12 @@ impl Default for TtsConfig {
         Self {
             serve_url: "http://127.0.0.1:8421".to_string(),
             voice: "af_nova".to_string(),
+            // Empty => `crate::tts` derives one Kokoro backend from
+            // `serve_url`/`voice` above. No Jarvis host is hardcoded
+            // here: a specific host address is deployment-specific and
+            // belongs in config.toml.
+            backends: Vec::new(),
+            fallback_timeout_secs: 5,
         }
     }
 }
